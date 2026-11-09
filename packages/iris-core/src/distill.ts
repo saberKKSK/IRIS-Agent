@@ -7,10 +7,9 @@
  *    记忆链路不能因为一次网关抽风就停摆。
  */
 
-import type { Context, Message, SimpleStreamOptions } from "@earendil-works/pi-ai";
-import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { ArchiveOptions, MemoryDraft, RawTurn, TierDecision } from "./archive.ts";
-import { LOCAL_API_KEY, MAGPIE_REASONING_EFFORT, magpieModel } from "./model.ts";
+import type { CompleteFn } from "./complete.ts";
+import { completeText } from "./complete.ts";
 
 export interface DistillOptions {
 	/** 网关模型 id，默认沿用 `magpieModel()` 的规则。 */
@@ -20,7 +19,7 @@ export interface DistillOptions {
 	timeoutMs?: number;
 	maxTokens?: number;
 	/** 测试缝：直接给「prompt → 文本」。生产环境走 Magpie。 */
-	complete?: (prompt: string, call: { system: string }) => Promise<string>;
+	complete?: CompleteFn;
 	/** 出错时的观察口（默认静默，避免把网关噪声打进 stdout）。 */
 	onError?: (error: unknown) => void;
 }
@@ -152,32 +151,9 @@ export function parseDrafts(raw: string, source: string): readonly MemoryDraft[]
 }
 
 /** 走 Magpie 的一次性补全：不开思考、temperature 0、失败不重试（调用方会回落规则）。 */
-function magpieComplete(options: DistillOptions): (prompt: string, call: { system: string }) => Promise<string> {
-	const model = magpieModel({ model: options.model, baseUrl: options.baseUrl });
-	const apiKey = options.apiKey ?? LOCAL_API_KEY;
-	const callOptions: SimpleStreamOptions = {
-		apiKey,
-		temperature: 0,
-		maxTokens: options.maxTokens ?? 512,
-		timeoutMs: options.timeoutMs ?? 20_000,
-		maxRetries: 0,
-		samplingParams: { reasoning_effort: MAGPIE_REASONING_EFFORT },
-	};
-	return async (prompt, call) => {
-		const messages: Message[] = [{ role: "user", content: prompt, timestamp: Date.now() }];
-		const context: Context = { systemPrompt: call.system, messages };
-		const stream = await streamSimple(model, context, callOptions);
-		let text = "";
-		for await (const event of stream) {
-			if (event.type === "text_delta") text += event.delta;
-		}
-		const final = await stream.result();
-		if (final.stopReason === "error" || final.stopReason === "aborted") {
-			throw new Error(final.errorMessage ?? "model stream failed");
-		}
-		if (text.trim().length > 0) return text;
-		return final.content.map((block) => (block.type === "text" ? block.text : "")).join("");
-	};
+function magpieComplete(options: DistillOptions): CompleteFn {
+	const { model, baseUrl, apiKey, timeoutMs, maxTokens } = options;
+	return (prompt, call) => completeText(prompt, { model, baseUrl, apiKey, timeoutMs, maxTokens, system: call.system });
 }
 
 /** 分档器：失败返回 undefined，`SqliteArchive.classify()` 会回落到规则。 */

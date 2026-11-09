@@ -26,7 +26,10 @@ function turnsOf() {
 	return CONVERSATION.map((turn) => ({ role: turn.role, content: turn.content, at: at + turn.delay }));
 }
 
-async function run(label: string, options: { llm: boolean }): Promise<{
+async function run(
+	label: string,
+	options: { llm: boolean },
+): Promise<{
 	tier: TierDecision;
 	memories: readonly MemoryRecord[];
 	ms: number;

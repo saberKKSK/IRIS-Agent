@@ -131,7 +131,8 @@ test("一轮对话：人格 prompt 进 pi，回复写回记忆", async () => {
 		},
 	});
 
-	assert.equal(turn.text, "我在。");
+	// 默认聊天标点：句尾句号被去掉；原始流事件不动，deltas 仍是模型原话
+	assert.equal(turn.text, "我在");
 	assert.equal(deltas.join(""), "我在。");
 	assert.deepEqual(types, ["turn_start", "delta", "delta", "delta", "turn_end"]);
 	assert.ok(turn.episode !== null);
@@ -266,4 +267,15 @@ test("开场注入：库里上次留下的重要记忆进 system prompt", async 
 	assert.ok(prompt.includes("你记得的事"));
 	assert.ok(prompt.includes("花生"));
 	await session.endConversation();
+});
+
+test("自我事实：她自己的账进 prompt，附一句「对不上就说对不上」", () => {
+	const archive = new SqliteArchive({ path: ":memory:" });
+	archive.rememberSelf("mbti-oejts", "第二次做的是 OEJTS 1.2，四维 72 到 78，结论 INTJ");
+	const session = createSession({ persona: PERSONA, streamFn: scripted(["嗯。"]), archive });
+
+	const prompt = session.systemPrompt;
+	assert.ok(prompt.includes("关于你自己"));
+	assert.ok(prompt.includes("OEJTS 1.2"));
+	assert.ok(prompt.includes("对不上就直接说他记错了"));
 });

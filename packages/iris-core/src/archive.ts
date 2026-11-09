@@ -13,6 +13,7 @@ import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { StyleProfile } from "./style.ts";
 import type { Episode, EpisodeKind } from "./types.ts";
 
 export type Tier = "ordinary" | "medium" | "critical";
@@ -61,6 +62,26 @@ export interface MemoryRecord {
 	createdAt: number;
 	expiresAt: number | null;
 	hits: number;
+}
+
+/**
+ * 一条「关于她自己」的事实：她做过什么、给出过什么结果、定过什么事。
+ * 跟用户记忆分开存：这些是她自己的账，不随会话过期，也不许模型自己改。
+ */
+export interface SelfFact {
+	key: string;
+	value: string;
+	source: string;
+	at: number;
+}
+
+/** 一份导入的风格档案（语料的量化结果 + 原话样本）。 */
+export interface StyleRecord {
+	id: string;
+	name: string;
+	profile: StyleProfile;
+	createdAt: number;
+	active: boolean;
 }
 
 export interface RecallOptions {
@@ -205,6 +226,34 @@ interface MemoryRow {
 	hits: number;
 }
 
+interface StyleRow {
+	id: string;
+	name: string;
+	source: string;
+	speaker: string;
+	profile: string;
+	created_at: number;
+	active: number;
+}
+
+interface SelfFactRow {
+	key: string;
+	value: string;
+	source: string;
+	at: number;
+}
+
+function toStyle(row: StyleRow): StyleRecord {
+	const profile = JSON.parse(row.profile) as StyleProfile;
+	return {
+		id: row.id,
+		name: row.name,
+		profile: { ...profile, name: row.name, source: row.source, speaker: row.speaker },
+		createdAt: row.created_at,
+		active: row.active === 1,
+	};
+}
+
 function asTier(value: string): Tier {
 	if (value === "critical" || value === "medium") return value;
 	return "ordinary";
@@ -289,6 +338,22 @@ const SCHEMA = [
 	"  before TEXT NOT NULL,",
 	"  after TEXT NOT NULL,",
 	"  editor TEXT NOT NULL,",
+	"  at INTEGER NOT NULL",
+	")",
+	"CREATE TABLE IF NOT EXISTS styles (",
+	"  id TEXT PRIMARY KEY,",
+	"  name TEXT NOT NULL,",
+	"  source TEXT NOT NULL DEFAULT '',",
+	"  speaker TEXT NOT NULL DEFAULT '',",
+	"  profile TEXT NOT NULL,",
+	"  created_at INTEGER NOT NULL,",
+	"  active INTEGER NOT NULL DEFAULT 0",
+	")",
+	"CREATE UNIQUE INDEX IF NOT EXISTS styles_by_name ON styles(name)",
+	"CREATE TABLE IF NOT EXISTS self_facts (",
+	"  key TEXT PRIMARY KEY,",
+	"  value TEXT NOT NULL,",
+	"  source TEXT NOT NULL DEFAULT '',",
 	"  at INTEGER NOT NULL",
 	")",
 ]
@@ -637,6 +702,85 @@ export class SqliteArchive {
 			byTier,
 			byStatus,
 		};
+	}
+
+	/** 存一份风格档案：同名覆盖，默认立刻生效（会话下一轮就用它）。 */
+	saveStyle(profile: StyleProfile, options: { activate?: boolean } = {}): StyleRecord {
+		const at = this.clock();
+		const id = this.nextId("style", at);
+		const activate = options.activate ?? true;
+		this.db.prepare("DELETE FROM styles WHERE name = ?").run(profile.name);
+		if (activate) this.db.prepare("UPDATE styles SET active = 0").run();
+		this.db
+			.prepare(
+				"INSERT INTO styles(id, name, source, speaker, profile, created_at, active) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			)
+			.run(id, profile.name, profile.source, profile.speaker, JSON.stringify(profile), at, activate ? 1 : 0);
+		return { id, name: profile.name, profile, createdAt: at, active: activate };
+	}
+
+	/** 取档案：给名字按名字，不给就取当前生效的那份。 */
+	style(name?: string): StyleRecord | undefined {
+		const row =
+			name === undefined
+				? (this.db
+						.prepare("SELECT * FROM styles WHERE active = 1 ORDER BY created_at DESC LIMIT 1")
+						.get() as unknown as StyleRow | undefined)
+				: (this.db.prepare("SELECT * FROM styles WHERE name = ?").get(name) as unknown as StyleRow | undefined);
+		return row === undefined ? undefined : toStyle(row);
+	}
+
+	/** 所有档案，生效的排最前。 */
+	styles(): StyleRecord[] {
+		const rows = this.db
+			.prepare("SELECT * FROM styles ORDER BY active DESC, created_at DESC")
+			.all() as unknown as readonly StyleRow[];
+		return rows.map(toStyle);
+	}
+
+	/** 切到某份档案（下一轮重建 prompt 时生效）。 */
+	activateStyle(name: string): StyleRecord {
+		const row = this.db.prepare("SELECT * FROM styles WHERE name = ?").get(name) as unknown as StyleRow | undefined;
+		if (row === undefined) throw new Error("style not found: " + name);
+		this.db.prepare("UPDATE styles SET active = 0").run();
+		this.db.prepare("UPDATE styles SET active = 1 WHERE id = ?").run(row.id);
+		return toStyle({ ...row, active: 1 });
+	}
+
+	/** 删掉一份档案；删的是生效的那份就什么也不生效了。 */
+	removeStyle(name: string): boolean {
+		const info = this.db.prepare("DELETE FROM styles WHERE name = ?").run(name);
+		return Number(info.changes) > 0;
+	}
+
+	/**
+	 * 记一条关于她自己的事实（做过什么、得出过什么结论）。同名覆盖，新的为准。
+	 * 只由人写（`remember.ts --self`），agent 没有这条路径：她不许改写自己的账。
+	 */
+	rememberSelf(key: string, value: string, options: { source?: string } = {}): SelfFact {
+		const at = this.clock();
+		const source = options.source ?? "";
+		this.db
+			.prepare(
+				"INSERT INTO self_facts(key, value, source, at) VALUES (?, ?, ?, ?) " +
+					"ON CONFLICT(key) DO UPDATE SET value = excluded.value, source = excluded.source, at = excluded.at",
+			)
+			.run(key, value, source, at);
+		return { key, value, source, at };
+	}
+
+	/** 她自己的账，最近写的在后。开场全量注入，所以按写入时间正序。 */
+	selfFacts(limit = 20): readonly SelfFact[] {
+		const rows = this.db
+			.prepare("SELECT * FROM self_facts ORDER BY at ASC, key ASC LIMIT ?")
+			.all(limit) as unknown as readonly SelfFactRow[];
+		return rows.map((row) => ({ key: row.key, value: row.value, source: row.source, at: row.at }));
+	}
+
+	/** 删掉一条自己的账。 */
+	forgetSelf(key: string): boolean {
+		const info = this.db.prepare("DELETE FROM self_facts WHERE key = ?").run(key);
+		return Number(info.changes) > 0;
 	}
 
 	close(): void {

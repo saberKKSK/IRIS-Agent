@@ -260,3 +260,21 @@ describe("文件库与开场注入", () => {
 		assert.ok(rows.every((memory) => memory.status === "active" || memory.status === "locked"));
 	});
 });
+
+describe("她自己的账（self facts）", () => {
+	it("同名覆盖、按写入顺序取回、可删", () => {
+		const { archive, advance } = make();
+		archive.rememberSelf("mbti-第一版", "做过 28 题精简版，四维全 100%，结论 INTJ", { source: "2026-11-09" });
+		advance(1000);
+		archive.rememberSelf("mbti-oejts", "换成 OEJTS 1.2，四维 72 到 78，结论还是 INTJ");
+		advance(1000);
+		archive.rememberSelf("mbti-第一版", "更正：那版题烂，只能当玩具");
+
+		const facts = archive.selfFacts();
+		assert.equal(facts.length, 2);
+		assert.equal(facts[0]?.key, "mbti-oejts");
+		assert.ok(facts[1]?.value.includes("只能当玩具"));
+		assert.equal(archive.forgetSelf("mbti-oejts"), true);
+		assert.equal(archive.selfFacts().length, 1);
+	});
+});

@@ -9,4 +9,5 @@ export * from "./memory.ts";
 export * from "./model.ts";
 export * from "./persona.ts";
 export * from "./session.ts";
+export * from "./style.ts";
 export * from "./types.ts";

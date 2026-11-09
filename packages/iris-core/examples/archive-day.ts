@@ -43,7 +43,10 @@ line(`多轮约定 → ${chat2.tier.tier}（${chat2.tier.reason}）`);
 
 const chat3 = await archive.ingest({
 	sessionId: "s1",
-	turns: [turn("user", "记住这个：我对花生过敏，别给我点带花生的", DAY), turn("assistant", "记下了，花生不行。", DAY + 1_000)],
+	turns: [
+		turn("user", "记住这个：我对花生过敏，别给我点带花生的", DAY),
+		turn("assistant", "记下了，花生不行。", DAY + 1_000),
+	],
 });
 line(`明确要求记住 → ${chat3.tier.tier}（${chat3.tier.reason}）`);
 
@@ -68,8 +71,16 @@ for (const query of ["看海", "花生", "累"]) {
 	const started = performance.now();
 	const result = archive.recall(query);
 	const cost = (performance.now() - started).toFixed(2);
-	line(`  查「${query}」用了 ${cost} ms，命中 ${result.hits.length} 条，预算 ${result.budget.used}/${result.budget.limit} tokens`);
-	if (result.text.length > 0) line(result.text.split("\n").map((row) => "    " + row).join("\n"));
+	line(
+		`  查「${query}」用了 ${cost} ms，命中 ${result.hits.length} 条，预算 ${result.budget.used}/${result.budget.limit} tokens`,
+	);
+	if (result.text.length > 0)
+		line(
+			result.text
+				.split("\n")
+				.map((row) => "    " + row)
+				.join("\n"),
+		);
 }
 
 line();
@@ -78,7 +89,9 @@ for (let i = 0; i < 4; i += 1) archive.recall("累");
 const promoted = archive.sweep();
 line(`  又想起 4 次（累计命中 5 次）→ sweep：升级 ${promoted.promoted} 条`);
 for (const memory of archive.timeline(10).filter((row) => row.hits >= 5)) {
-	line(`  · [${memory.tier}/${memory.status}] ${memory.text}（hits=${memory.hits}，过期：${memory.expiresAt === null ? "永不过期" : "有"})`);
+	line(
+		`  · [${memory.tier}/${memory.status}] ${memory.text}（hits=${memory.hits}，过期：${memory.expiresAt === null ? "永不过期" : "有"})`,
+	);
 }
 
 line();

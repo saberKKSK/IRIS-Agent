@@ -15,11 +15,20 @@ import type { AssistantMessage, SimpleStreamOptions } from "@earendil-works/pi-a
 import { createInitialSystemMessage, toToolDeclaration } from "@earendil-works/pi-ai";
 import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
-import type { MemoryRecord, RawTurn, RecallOptions, RecallResult, SqliteArchive, TierDecision } from "./archive.ts";
+import type {
+	MemoryRecord,
+	RawTurn,
+	RecallOptions,
+	RecallResult,
+	SqliteArchive,
+	StyleRecord,
+	TierDecision,
+} from "./archive.ts";
 import { renderMemories } from "./archive.ts";
 import type { InMemoryMemoryStore } from "./memory.ts";
 import { LOCAL_API_KEY, MAGPIE_REASONING_EFFORT, type ModelReasoningEffort, magpieModel } from "./model.ts";
-import { buildSystemPrompt } from "./persona.ts";
+import { buildSystemPrompt, chatify, stripStageDirections, stripTrailingPeriods } from "./persona.ts";
+import { renderStyle } from "./style.ts";
 import type { Episode, Persona, PersonaState, Relationship } from "./types.ts";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -85,6 +94,14 @@ export interface IrisSessionOptions {
 	recentLimit?: number;
 	/** 开场注入的长期记忆条数（重要档优先）。默认 6。 */
 	memoryLimit?: number;
+	/** 用哪份语料风格档案；不填就用库里当前生效的那份。 */
+	styleName?: string;
+	/** 外部人格文档（Markdown 原文）。给了就用它顶替模板里的「## 你是谁」。 */
+	personaDoc?: string;
+	/** 允许人格文档用括号写动作/旁白。默认关闭（语音优先，旁白会被念出来）。 */
+	stageDirections?: boolean;
+	/** 标点风格：`chat`（默认）句尾不留句号，`prose` 保留。 */
+	punctuation?: "chat" | "prose";
 	/** 网关模型 id，默认 `deepseek/deepseek-flash`。 */
 	model?: string;
 	/** 网关根地址，含 `/v1`。 */
@@ -169,11 +186,15 @@ export class IrisSession {
 	readonly agent: Agent;
 
 	private readonly persona: Persona;
+	private readonly personaDoc: string | undefined;
+	private readonly stageDirections: boolean | undefined;
+	private readonly punctuation: "chat" | "prose" | undefined;
 	private readonly memory: InMemoryMemoryStore | null;
 	private readonly archive: SqliteArchive | null;
 	private conversationId: string | null = null;
 	private readonly recentLimit: number;
 	private readonly memoryLimit: number;
+	private styleName: string | null;
 	private readonly episodeTags: readonly string[];
 	private readonly clock: () => number;
 	private readonly listener: ((event: IrisSessionEvent) => void) | undefined;
@@ -186,10 +207,14 @@ export class IrisSession {
 
 	constructor(options: IrisSessionOptions) {
 		this.persona = options.persona;
+		this.personaDoc = options.personaDoc;
+		this.stageDirections = options.stageDirections;
+		this.punctuation = options.punctuation;
 		this.memory = options.memory ?? null;
 		this.archive = options.archive ?? null;
 		this.recentLimit = options.recentLimit ?? DEFAULT_RECENT;
 		this.memoryLimit = options.memoryLimit ?? DEFAULT_MEMORY_LIMIT;
+		this.styleName = options.styleName ?? null;
 		this.episodeTags = options.episodeTags ?? ["对话"];
 		this.clock = options.clock ?? Date.now;
 		this.listener = options.onEvent;
@@ -229,6 +254,18 @@ export class IrisSession {
 
 	get relationship(): Relationship {
 		return this.bond;
+	}
+
+	/** 当前生效的风格档案（没接归档层、或库里没导入过就是 null）。 */
+	get style(): StyleRecord | null {
+		if (this.archive === null) return null;
+		return this.archive.style(this.styleName ?? undefined) ?? null;
+	}
+
+	/** 换一份语料风格，立刻重建 system prompt（历史保留）。 */
+	useStyle(name: string): void {
+		this.styleName = name;
+		this.refreshPrompt();
 	}
 
 	/** 当前人格 prompt（每次按最新状态与记忆重编）。 */
@@ -296,6 +333,11 @@ export class IrisSession {
 		for (const block of message.content) {
 			if (block.type === "text") text += block.text;
 			else if (block.type === "thinking") reasoning += block.thinking;
+		}
+
+		if (this.stageDirections !== true) text = stripStageDirections(text);
+		if (this.punctuation !== "prose") {
+			text = chatify(stripTrailingPeriods(text));
 		}
 
 		const usage: IrisUsage = { promptTokens: message.usage.input, completionTokens: message.usage.output };
@@ -380,12 +422,19 @@ export class IrisSession {
 	private buildPrompt(): string {
 		const now = this.clock();
 		const remembered = this.remembered(now);
+		const selfFacts = this.selfFactLines();
+		const style = this.styleText();
 		return buildSystemPrompt({
 			persona: this.persona,
+			...(this.personaDoc === undefined ? {} : { portrait: this.personaDoc }),
+			...(this.stageDirections === undefined ? {} : { stageDirections: this.stageDirections }),
+			...(this.punctuation === undefined ? {} : { punctuation: this.punctuation }),
 			state: this.state,
 			relationship: this.bond,
 			recent: this.memory?.recent(this.recentLimit) ?? [],
 			...(remembered.length === 0 ? {} : { memories: remembered }),
+			...(selfFacts.length === 0 ? {} : { selfFacts }),
+			...(style === undefined ? {} : { style }),
 			now,
 		});
 	}
@@ -399,6 +448,24 @@ export class IrisSession {
 		const rows = this.archive.essential(this.memoryLimit);
 		if (rows.length === 0) return [];
 		return renderMemories(rows, now).split("\n");
+	}
+
+	/**
+	 * 她自己的账（做过什么、得出过什么结果）。开场全量注入：别人转述她的过去时，
+	 * 她得有一份自己的版本可以对照，否则喂什么说什么（ADR-0019）。
+	 */
+	private selfFactLines(): readonly string[] {
+		if (this.archive === null) return [];
+		return this.archive.selfFacts().map((fact) => fact.value);
+	}
+
+	/** 语料风格渲染成 prompt 段落；没导入过就返回 undefined。 */
+	private styleText(): string | undefined {
+		if (this.archive === null) return undefined;
+		const record = this.archive.style(this.styleName ?? undefined);
+		if (record === undefined) return undefined;
+		const text = renderStyle(record.profile);
+		return text.length === 0 ? undefined : text;
 	}
 
 	private emit(event: IrisSessionEvent): void {

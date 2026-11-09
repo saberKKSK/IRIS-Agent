@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildSystemPrompt, describeRelationship } from "../src/persona.ts";
+import { buildSystemPrompt, describeRelationship, stripStageDirections, stripTrailingPeriods } from "../src/persona.ts";
 import type { Episode, Persona, PersonaState } from "../src/types.ts";
 
 const persona: Persona = {
@@ -65,7 +65,7 @@ describe("buildSystemPrompt", () => {
 
 	it("states boundaries and forbids interviewer mode", () => {
 		assert.match(prompt, /不冒充人类打电话/);
-		assert.match(prompt, /不要把每句话都变成提问/);
+		assert.match(prompt, /别连着追问/);
 	});
 
 	it("omits the memory section when there is nothing to recall", () => {
@@ -77,5 +77,48 @@ describe("buildSystemPrompt", () => {
 			now: 5000,
 		});
 		assert.equal(bare.includes("你们最近一起经历的"), false);
+	});
+});
+describe("stripStageDirections", () => {
+	it("drops a stand-alone action line", () => {
+		assert.equal(stripStageDirections("（把书放到窗台上）\n说吧。"), "说吧。");
+	});
+
+	it("drops a leading action glued to speech", () => {
+		assert.equal(stripStageDirections("（翻过一页书）在。"), "在。");
+	});
+
+	it("drops a speaker label in front of the action", () => {
+		assert.equal(stripStageDirections("她：（合上书，抬眼看你）\n在。"), "在。");
+	});
+
+	it("drops asterisk play-acting", () => {
+		assert.equal(stripStageDirections("* sighs *\nFine."), "Fine.");
+	});
+
+	it("keeps parentheses inside a sentence", () => {
+		const text = "这不太像你（我是说，不太像平时的你）。";
+		assert.equal(stripStageDirections(text), text);
+	});
+});
+describe("stripTrailingPeriods", () => {
+	it("drops the full stop at the end of each line", () => {
+		assert.equal(stripTrailingPeriods("在。\n书翻到一半。"), "在\n书翻到一半");
+	});
+
+	it("keeps question marks and ellipses", () => {
+		assert.equal(stripTrailingPeriods("哪个更烦？\n算了……"), "哪个更烦？\n算了……");
+	});
+
+	it("keeps stops inside a sentence", () => {
+		assert.equal(stripTrailingPeriods("有点。不过我更不想看。"), "有点。不过我更不想看");
+	});
+
+	it("leaves blank lines alone", () => {
+		assert.equal(stripTrailingPeriods("在。\n\n说吧。"), "在\n\n说吧");
+	});
+
+	it("still strips when the model leaves a space after the stop", () => {
+		assert.equal(stripTrailingPeriods("我先笑一会儿。 \n\n三代穷过的不能找 "), "我先笑一会儿\n\n三代穷过的不能找");
 	});
 });
