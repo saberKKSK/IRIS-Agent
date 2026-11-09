@@ -14,7 +14,8 @@
 		"demo": "npm --prefix packages/iris-core run demo",
 		"chat": "npm --prefix packages/iris-core run chat",
 		"talk": "npm --prefix packages/iris-core run talk",
-		"bench": "npm --prefix packages/iris-core run bench"
+		"bench": "npm --prefix packages/iris-core run bench",
+		"web": "npm --prefix packages/iris-core run web"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.3.5",

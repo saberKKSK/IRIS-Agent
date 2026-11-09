@@ -313,6 +313,11 @@ const SCHEMA = [
 	"  at INTEGER NOT NULL",
 	")",
 	"CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages(conversation_id, seq)",
+	"CREATE TABLE IF NOT EXISTS conversation_marks (",
+	"  conversation_id TEXT PRIMARY KEY,",
+	"  last_seq INTEGER NOT NULL,",
+	"  at INTEGER NOT NULL",
+	")",
 	"CREATE TRIGGER IF NOT EXISTS messages_no_update BEFORE UPDATE ON messages BEGIN SELECT RAISE(ABORT, 'messages are append-only'); END",
 	"CREATE TABLE IF NOT EXISTS maintenance (id INTEGER PRIMARY KEY, reason TEXT, at INTEGER)",
 	"CREATE TRIGGER IF NOT EXISTS messages_no_delete BEFORE DELETE ON messages WHEN NOT EXISTS (SELECT 1 FROM maintenance) BEGIN SELECT RAISE(ABORT, 'messages are append-only'); END",
@@ -443,11 +448,49 @@ export class SqliteArchive {
 
 	/** 规则优先；给了 classifier 就以它为准。 */
 	async classify(conversationId: string): Promise<TierDecision> {
-		const turns = this.messagesOf(conversationId);
+		return this.judge(this.messagesOf(conversationId));
+	}
+
+	private async judge(turns: readonly RawTurn[]): Promise<TierDecision> {
 		const text = turns.map((turn) => turn.content).join("\n");
 		const decided = await this.classifier?.({ turns, text });
 		if (decided !== undefined) return decided;
 		return ruleTier(turns, text);
+	}
+
+	/** 最近一次开过的会话（同一个 session_id）。重启时复用它，全库就只有一条会话线（ADR-0022）。 */
+	latestConversation(sessionId: string): string | null {
+		const row = this.db
+			.prepare("SELECT id FROM conversations WHERE session_id = ? ORDER BY started_at DESC, id DESC LIMIT 1")
+			.get(sessionId) as unknown as { id: string } | undefined;
+		return row?.id ?? null;
+	}
+
+	/** 这个会话里还没提炼成记忆的原文（游标之后）。 */
+	pendingTurns(conversationId: string): readonly RawTurn[] {
+		const mark = this.db
+			.prepare("SELECT last_seq FROM conversation_marks WHERE conversation_id = ?")
+			.get(conversationId) as unknown as { last_seq: number } | undefined;
+		const rows = this.db
+			.prepare("SELECT role, content, at FROM messages WHERE conversation_id = ? AND seq > ? ORDER BY seq")
+			.all(conversationId, mark?.last_seq ?? -1) as unknown as readonly {
+			role: string;
+			content: string;
+			at: number;
+		}[];
+		return rows.map((row) => ({ role: row.role as RawTurn["role"], content: row.content, at: row.at }));
+	}
+
+	/** 记下提炼游标：同一个会话可以被收尾多次，只处理新增部分，不重复写记忆。 */
+	private markConversation(conversationId: string, at = this.clock()): void {
+		const last = this.db
+			.prepare("SELECT COALESCE(MAX(seq), -1) AS seq FROM messages WHERE conversation_id = ?")
+			.get(conversationId) as unknown as { seq: number };
+		this.db
+			.prepare(
+				"INSERT INTO conversation_marks(conversation_id, last_seq, at) VALUES (?, ?, ?) ON CONFLICT(conversation_id) DO UPDATE SET last_seq = excluded.last_seq, at = excluded.at",
+			)
+			.run(conversationId, Number(last.seq), at);
 	}
 
 	/** 一次完整的收尾：原文入库 → 分档 → 提炼 → 按档写记忆。 */
@@ -465,12 +508,25 @@ export class SqliteArchive {
 	async finishConversation(
 		conversationId: string,
 	): Promise<{ tier: TierDecision; memories: readonly MemoryRecord[] }> {
-		const decision = await this.classify(conversationId);
+		const fresh = this.pendingTurns(conversationId);
+		const decision = await this.judge(fresh.length > 0 ? fresh : this.messagesOf(conversationId));
 		this.setTier(conversationId, decision, this.clock());
-		const turns = this.messagesOf(conversationId);
-		const drafts = (await this.distiller?.({ turns, tier: decision.tier })) ?? fallbackDraft(turns);
+		if (fresh.length === 0) return { tier: decision, memories: [] };
+		const drafts = (await this.distiller?.({ turns: fresh, tier: decision.tier })) ?? fallbackDraft(fresh);
 		const memories = drafts.map((draft) => this.writeMemory(conversationId, decision.tier, draft));
+		this.markConversation(conversationId);
 		return { tier: decision, memories };
+	}
+
+	/**
+	 * 最近若干条原文，跨会话按时间取（旧→新）。
+	 * 重启后把上次的对话接回来用（ADR-0021）；只读，不改任何状态。
+	 */
+	recentMessages(limit = 20, since = 0): readonly RawTurn[] {
+		const rows = this.db
+			.prepare("SELECT role, content, at FROM messages WHERE at >= ? ORDER BY at DESC, seq DESC LIMIT ?")
+			.all(since, limit) as unknown as readonly { role: string; content: string; at: number }[];
+		return rows.map((row) => ({ role: row.role as RawTurn["role"], content: row.content, at: row.at })).reverse();
 	}
 
 	messagesOf(conversationId: string): readonly RawTurn[] {

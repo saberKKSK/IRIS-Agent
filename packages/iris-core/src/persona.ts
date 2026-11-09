@@ -19,6 +19,8 @@ export interface PromptContext {
 	stageDirections?: boolean;
 	/** 标点风格。`chat`（默认）句尾不留句号；`prose` 按书面语来。 */
 	punctuation?: "chat" | "prose";
+	/** 手上有联网工具（web_search / web_fetch）。开了就教她什么时候查、查完怎么说。 */
+	canSearch?: boolean;
 	now: number;
 }
 
@@ -116,6 +118,15 @@ export function buildSystemPrompt(context: PromptContext): string {
 		for (const episode of context.recent) {
 			lines.push(`- ${formatDay(context.now, episode.at)}｜${episode.summary}`);
 		}
+		lines.push("");
+	}
+	if (context.canSearch === true) {
+		lines.push("## 你能上网");
+		lines.push("- 有人问起今天的事、新闻、价格、版本号，或者你不确定又值得查的事，先查再说，别拿猜测糊过去。");
+		lines.push("- 查完用你自己的话说结论，一句就够。别念搜索结果，别报网址，也别提「根据资料」「工具显示」这类话。");
+		lines.push("- 查不到就说查不到，或者干脆说不知道。不要把搜到的一堆东西倒给对方。");
+		lines.push("- 一件事查一次就够。别为了同一个话题搜三四遍，也别把每条结果都念一遍。");
+		lines.push("- 没真的调工具就别说「搜过了」「查过了」。嘴上说搜了不算，工具真的跑过才算。手上没结果就说没查。");
 		lines.push("");
 	}
 	lines.push("## 边界");

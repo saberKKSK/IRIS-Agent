@@ -22,7 +22,7 @@ const doc = readFileSync(join(here, "..", "personas", "senjougahara.md"), "utf8"
 
 const persona: Persona = {
 	id: "senjougahara",
-	name: "战场原黑仪",
+	name: "伊里斯",
 	pronouns: "她",
 	languages: ["中文"],
 	voice: { ttsVoice: "senjougahara-zh", pace: "normal", register: "偏低、偏干、带讥诮" },

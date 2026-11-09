@@ -7,6 +7,7 @@
  *
  * 命令：/prompt 看 system prompt ／ /memory 看开场注入的记忆
  *      /recall 关键词 查归档 ／ /stats 看库 ／ /exit 收尾（归档 + 提炼记忆）
+ *      /img 图片路径 [| 附带一句话] 发张图给她看（视觉模型转述，她照自己的脾气接）
  */
 
 import { readFileSync } from "node:fs";
@@ -14,9 +15,11 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { defaultArchivePath, SqliteArchive } from "../src/archive.ts";
-import type { IrisSessionEvent } from "../src/session.ts";
-import { createSession } from "../src/session.ts";
+import type { IrisSessionEvent, IrisTurn } from "../src/session.ts";
+import { createSession, imageFrame } from "../src/session.ts";
 import type { Persona } from "../src/types.ts";
+import type { VisionNote } from "../src/vision.ts";
+import { webTools } from "../src/web.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -26,7 +29,7 @@ const doc = readFileSync(join(here, "..", "personas", "senjougahara.md"), "utf8"
 
 const persona: Persona = {
 	id: "senjougahara",
-	name: "战场原黑仪",
+	name: "伊里斯",
 	pronouns: "她",
 	languages: ["中文"],
 	voice: { ttsVoice: "senjougahara-zh", pace: "normal", register: "偏低、偏干、带讥诮" },
@@ -51,12 +54,18 @@ const session = createSession({
 	relationship: { closeness: 0.45, sharedMoments: 0, lastInteractionAt: Date.now() },
 	stageDirections: has("--stage"),
 	...(has("--prose") ? { punctuation: "prose" as const } : {}),
+	// 联网（ADR-0024）：真需要查的时候她会自己去查，查不到不会硬编。
+	...(has("--offline") ? {} : { tools: webTools() }),
 });
 
 const dim = (text: string): string => (process.stdout.isTTY === true ? `\u001b[2m${text}\u001b[0m` : text);
 
 process.stdout.write(`\n${persona.name}　（库：${dbPath}）\n`);
-process.stdout.write(`命令：/prompt /memory /recall 关键词 /stats /exit\n\n`);
+if (session.restoredMessages > 0) {
+	const id = (session.conversation ?? "").slice(0, 14);
+	process.stdout.write(dim(`（同一个会话 ${id} · 接回 ${session.restoredMessages} 条原文）\n`));
+}
+process.stdout.write(`命令：/prompt /memory /recall 关键词 /stats /img 图片路径 /exit\n\n`);
 
 // 不用 rl.question()：管道输入下第二个 question() 不会 resolve（Node 24 实测）。
 // 改成「行事件进队列 + 等待者唤醒」，交互与非交互同一条路。
@@ -91,10 +100,22 @@ function nextLine(): Promise<string | null> {
 	});
 }
 
-/** 发一句，边生成边打印。 */
-async function say(input: string): Promise<void> {
+/** 跑一轮并把字流出来；两种入口（文字、图片）共用这一段。 */
+async function streamTurn(
+	run: (hooks: { onEvent(event: IrisSessionEvent): void }) => Promise<IrisTurn>,
+): Promise<void> {
 	let started = false;
 	const onEvent = (event: IrisSessionEvent): void => {
+		if (event.type === "tool_start") {
+			const args = event.args as { query?: unknown; url?: unknown } | null;
+			const what = typeof args?.query === "string" ? args.query : typeof args?.url === "string" ? args.url : "";
+			process.stdout.write(dim(`\n · 联网：${what}`));
+			return;
+		}
+		if (event.type === "tool_end") {
+			process.stdout.write(dim(event.isError ? "（没查成）" : "（查回来了）"));
+			return;
+		}
 		if (event.type !== "delta") return;
 		if (!started) {
 			started = true;
@@ -106,7 +127,7 @@ async function say(input: string): Promise<void> {
 	// 生成期间先松开输入，免得半截打字混进下一轮
 	if (interactive) rl.pause();
 	try {
-		const turn = await session.say(input, { onEvent });
+		const turn = await run({ onEvent });
 		if (!started) process.stdout.write(`\n${persona.name[0]}：${turn.text}`);
 		process.stdout.write(`\n${dim(`  · ${turn.firstTokenMs} ms 首字 / ${turn.latencyMs} ms\n\n`)}`);
 	} catch (error) {
@@ -115,6 +136,26 @@ async function say(input: string): Promise<void> {
 	} finally {
 		if (interactive) rl.resume();
 	}
+}
+
+/** 发一句，边生成边打印。 */
+async function say(input: string): Promise<void> {
+	await streamTurn((hooks) => session.say(input, hooks));
+}
+
+/** 发一张图：先让视觉模型转述（打印出来给人看），再把转述交给她。 */
+async function sayAbout(path: string, hint: string): Promise<void> {
+	process.stdout.write(`\n${dim("（看图…）")}`);
+	let note: VisionNote;
+	try {
+		note = await session.look(path);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		process.stdout.write(`\r（这张图没看成：${message}）\n\n`);
+		return;
+	}
+	process.stdout.write(`\r${dim(`（看到：${note.text}  · ${note.latencyMs} ms）`)}`);
+	await streamTurn((hooks) => session.say(imageFrame(note, hint), hooks));
 }
 
 async function repl(): Promise<void> {
@@ -147,6 +188,18 @@ async function repl(): Promise<void> {
 		if (input === "/stats") {
 			const stats = archive.stats();
 			process.stdout.write(`\n${JSON.stringify(stats)}\n\n`);
+			continue;
+		}
+		if (input.startsWith("/img ")) {
+			const rest = input.slice(5).trim();
+			const bar = rest.indexOf("|");
+			const rawPath = (bar === -1 ? rest : rest.slice(0, bar)).trim().replace(/^["']|["']$/g, "");
+			const hint = bar === -1 ? "" : rest.slice(bar + 1).trim();
+			if (rawPath.length === 0) {
+				process.stdout.write("\n用法：/img <图片路径> 或 /img <图片路径> | 附带一句话\n\n");
+				continue;
+			}
+			await sayAbout(rawPath, hint);
 			continue;
 		}
 		if (input.startsWith("/recall ")) {

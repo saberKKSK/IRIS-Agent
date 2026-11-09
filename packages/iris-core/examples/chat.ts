@@ -16,7 +16,7 @@ const doc = await readFile(personaPath, "utf8");
 
 const persona: Persona = {
 	id: "senjougahara",
-	name: "战场原黑仪",
+	name: "伊里斯",
 	pronouns: "她",
 	languages: ["中文"],
 	voice: { ttsVoice: "senjougahara-zh", pace: "normal", register: "低、冷、偶尔带刺" },

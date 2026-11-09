@@ -12,9 +12,13 @@ import {
 	createSession,
 	InMemoryMemoryStore,
 	IrisSessionError,
+	looksLikeLookup,
+	lookupNudge,
 	magpieModel,
 	magpieStreamFn,
 	SqliteArchive,
+	stripNudgeText,
+	webTools,
 } from "../src/index.ts";
 import type { Persona } from "../src/types.ts";
 
@@ -278,4 +282,136 @@ test("自我事实：她自己的账进 prompt，附一句「对不上就说对�
 	assert.ok(prompt.includes("关于你自己"));
 	assert.ok(prompt.includes("OEJTS 1.2"));
 	assert.ok(prompt.includes("对不上就直接说他记错了"));
+});
+
+test("重启接回：上次的原文直接进 pi 的 transcript（ADR-0021）", async () => {
+	const archive = new SqliteArchive({ path: ":memory:" });
+	const first = createSession({ persona: PERSONA, streamFn: scripted(["在。"]), archive });
+	await first.say("在吗");
+	await first.endConversation();
+	assert.equal(first.restoredMessages, 0, "第一个进程没有可接的历史");
+
+	const seen: AgentMessage[][] = [];
+	const second = createSession({
+		persona: PERSONA,
+		streamFn: scripted(["接上了。"], (messages) => seen.push([...messages])),
+		archive,
+	});
+	assert.equal(second.restoredMessages, 2, "一问一答各算一条");
+	assert.ok(second.messages.some((message) => textOf(message).includes("在吗")));
+	assert.equal(archive.stats().conversations, 1, "复用的是同一条会话，不是又开一条");
+
+	await second.say("还记得我吗");
+	assert.ok(
+		seen[0]?.some((message) => textOf(message).includes("在吗")),
+		"接回来的历史要真的进请求",
+	);
+	await second.endConversation();
+	assert.equal(archive.stats().conversations, 1);
+});
+
+test("接回的边界：关掉不接、隔两天也接、按字符预算裁", async () => {
+	const archive = new SqliteArchive({ path: ":memory:" });
+	await archive.ingest({
+		sessionId: "iris",
+		turns: [
+			{ role: "user", content: "很久以前说的话", at: Date.now() - 48 * 60 * 60 * 1000 },
+			{ role: "assistant", content: "嗯。", at: Date.now() - 48 * 60 * 60 * 1000 + 1000 },
+		],
+	});
+
+	const off = createSession({ persona: PERSONA, streamFn: scripted(["嗯。"]), archive, resumeMessages: 0 });
+	assert.equal(off.restoredMessages, 0);
+	// 只看原文消息：ingest 同时提炼了记忆，系统提示里仍会提到这件事（那是记忆层的事）
+	assert.equal(off.messages.filter((message) => message.role === "user").length, 0);
+
+	// 同一个会话就是同一段对话：隔了两天也接着聊，不分「新的一天」（ADR-0022）
+	const resumed = createSession({ persona: PERSONA, streamFn: scripted(["嗯。"]), archive });
+	assert.equal(resumed.restoredMessages, 2);
+	await resumed.endConversation();
+
+	// 关掉复用就新开一条会话
+	const fresh = createSession({ persona: PERSONA, streamFn: scripted(["嗯。"]), archive, reuseConversation: false });
+	assert.equal(fresh.restoredMessages, 2, "新会话是空的，退回跨会话取最近的原文");
+	await fresh.endConversation();
+	assert.equal(archive.stats().conversations, 2);
+
+	// 预算只留最新的几条（库里有四条：7 + 2 + 12 + 2 字）
+	const trimmed = createSession({ persona: PERSONA, streamFn: scripted(["嗯。"]), archive, resumeChars: 14 });
+	assert.equal(trimmed.restoredMessages, 2, "字符预算只留得下最后一问一答");
+	await trimmed.endConversation();
+});
+
+test("同一个会话收尾两次：不重复写记忆", async () => {
+	const archive = new SqliteArchive({ path: ":memory:" });
+	const first = createSession({ persona: PERSONA, streamFn: scripted(["好。"]), archive });
+	await first.say("记住这个：我对花生过敏");
+	const ended = await first.endConversation();
+	assert.equal(ended?.memories.length, 1);
+
+	const second = createSession({ persona: PERSONA, streamFn: scripted(["嗯。"]), archive });
+	assert.equal(archive.stats().conversations, 1);
+	const again = await second.endConversation();
+	assert.equal(again?.memories.length, 0, "没有新内容就不该再写记忆");
+	assert.equal(archive.stats().byTier.critical, 1, "记忆只写了一条");
+});
+
+test("要不要出去查：只认「去查」的口吻，问自己的事不查", () => {
+	const yes = [
+		"帮我搜一下今天有什么 AI 新闻",
+		"你试试随便搜索",
+		"帮我查一下今天东京天气怎么样",
+		"搜搜看最近的显卡价格",
+		"Google the latest release notes",
+	];
+	for (const text of yes) assert.equal(looksLikeLookup(text), true, text);
+	const no = [
+		"今天有点累",
+		"你记得我上次说的那个吗",
+		"我们上次查过这个吧",
+		"帮我想个名字",
+		"你搜过没有",
+		"查一下记忆里有没有花生",
+	];
+	for (const text of no) assert.equal(looksLikeLookup(text), false, text);
+});
+
+test("强制查那句提示：带今天的日期，能摘干净", () => {
+	const now = Date.UTC(2026, 10, 9, 4, 0, 0);
+	const nudge = lookupNudge(now);
+	assert.ok(nudge.includes("2026年11月9日"), "提示里得有今天的日期，否则她会编一个");
+	const input = "帮我查一下今天东京天气";
+	const sent = input + nudge;
+	assert.equal(stripNudgeText(sent), input);
+	assert.equal(stripNudgeText(input), input, "没有提示就原样返回");
+	assert.equal(stripNudgeText("我提过（这一句是新问题）但不在末尾"), "我提过（这一句是新问题）但不在末尾");
+});
+
+test("她要出去查：发给模型的那一轮带提示，落库的仍是原话", async () => {
+	const archive = new SqliteArchive({ path: ":memory:" });
+	const fake = webTools();
+	const session = createSession({ persona: PERSONA, streamFn: scripted(["好。"]), archive, tools: fake });
+	await session.say("帮我搜一下今天有什么 AI 新闻");
+
+	const users = session.messages.filter((message) => message.role === "user");
+	const last = users.at(-1);
+	assert.ok(last !== undefined);
+	const text =
+		typeof last.content === "string"
+			? last.content
+			: last.content.map((b) => (b.type === "text" ? b.text : "")).join("");
+	assert.ok(text.includes("这一句是新问题"), "发出去的那一轮得带上「只查这一句」的提示");
+
+	const stored = archive.recentMessages(2, 0);
+	assert.equal(stored[0]?.content, "帮我搜一下今天有什么 AI 新闻", "落库的是原话，不带提示");
+	await session.endConversation();
+});
+
+test("没工具就不加那句提示", async () => {
+	const session = createSession({ persona: PERSONA, streamFn: scripted(["嗯。"]), tools: [] });
+	await session.say("帮我搜一下今天有什么 AI 新闻");
+	const users = session.messages.filter((message) => message.role === "user");
+	const last = users.at(-1);
+	const text = typeof last?.content === "string" ? last.content : "";
+	assert.ok(!text.includes("这一句是新问题"));
 });

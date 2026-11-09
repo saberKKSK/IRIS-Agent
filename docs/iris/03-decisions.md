@@ -209,3 +209,127 @@
 - 代价：system prompt 从 2669 字符涨到 **4079 字符 / 260 行**（人设文档 2327 + 自我事实 ~200 + 规则），首字从 ~1.0 s 到 ~1.3–2.0 s。自我事实是**每轮全量注入**的，条数涨上去要分档（现在的上限是 20 条）。
 - 边界：自我事实记的是「她做过什么、得出过什么结果」，不是用户档案（那在 memories 里）、也不是设定（那在 persona 文档里）。事实与设定冲突时以事实为准，因为设定是「她是谁」，事实是「她干过什么」，后者能被外部证据核对。
 - 状态：已定，已实施（`npm test` 86/86、`tsc` 0、`biome` 只有 useTemplate 提示）。
+
+## ADR-0020 · 给她装眼睛：看图走单独模型，转述再进主会话
+
+- 背景（2026-11-09，用户 m02366 原话：「现在家里图片识别上传图的没多模态」）。她之前对任何图片都只能装看不见。查下来有两层原因：
+  1. **她自己的模型声明只吃文本**：`packages/iris-core/src/model.ts` 的 `magpieModel()` 写死 `input: ["text"]`。pi 的 OpenAI 兼容适配器对**用户消息**里的 image 块其实照转（`packages/ai/src/api/openai-completions.ts:1256-1285` → `{ type: "image_url", image_url: { url: "data:<mime>;base64,…" } }`），只有**工具结果**里的图才受 `model.input.includes("image")` 门控（同文件 :1429）。所以声明 `["text"]` 是拦路点之一，但不是唯一的坑。
+  2. **网关里能看图的模型只有一个**。本机 Magpie `GET http://127.0.0.1:3425/v1/models` 共 14 个模型，逐个用同一张 51 KB PNG 打成 data URI 实测：`any/gpt-6-astra`、`any/claude-opus-5-5` → http 404「Any: 当前 API 不支持所选模型」；`workbuddy-ai/gpt-6-luna`、`workbuddy-ai/glm-5.3`、`workbuddy-ai/gpt-6.1-sol` → http 429「Credits exhausted」；`deepseek/deepseek-flash`、`deepseek/deepseek-v4-pro` → **http 200 但 content 为空**（收下图片、什么都不说，最坑的是不报错）；**`workbuddy-ai/hy4free` → 真能看图**，免费、无额度限制。本机也没有第二条视觉路径（无 ollama / LM Studio，Python 无 paddleocr / rapidocr / easyocr / cnocr，pwsh 加载 WinRT `Windows.Media.Ocr.OcrEngine` 失败）。
+- 决策与落地：
+  1. `model.ts` 加 `MAGPIE_VISION_MODEL = "workbuddy-ai/hy4free"` 与 `visionModel()`（`input: ["text", "image"]`、`reasoning: false`、`maxTokens: 2048`，env `MAGPIE_VISION_MODEL` 可覆盖）。**主对话模型不变**——看图是另一条路，不是换模型。
+  2. 新增 `src/vision.ts`：`loadImage(path)`（5 MB 上限，空文件/超限直接抛，不静默降级）+ `describeImage(image, options)`（`temperature 0.2`、`reasoning_effort: "none"`、90 s 超时、不重试）。**正文为空且 `stopReason === "length"` 时把预算翻倍再试一次**，两次都空才抛「视觉模型什么都没说」。
+  3. **两段式**：`IrisSession.look()` 出转述（`VisionNote`），`sayAbout()` 把转述包成一句用户消息（`imageFrame()` → 「（对方发来一张图，你看到的是：…）」）再走原来的 `say()`。**原图不进主会话上下文**——主模型看不了，塞进去只是烧 token。
+  4. 入口：REPL 的 `/img <路径> [| 附带一句话]`、`examples/look.ts`（`npm run look -- <图> [--note-only]`）。
+  5. 问法必须朴素。hy4free 是思考型，问句里一出现清单式要求（「什么图 / 谁在说话 / 有没有数字和时间」）或开放问「这张图里是什么？」，它就在 reasoning 里逐字统计、永远收不了尾：实测 1200 / 2400 两个预算都被思考吃干净、正文 0 字（`thinking` 1776 / 3537 字）。定稿 `DEFAULT_VISION_PROMPT = "说说这张图里有什么，三句以内。别逐句抄。"`，同一张图 8.2 s 出 233 字。
+- 实测（`npm test` 96/96、`tsc` 0、`biome` 只剩 useTemplate 提示）：
+  - 聊天截图（51 KB）：转述 8805 ms / prompt 514 / completion 474，她接上「四项全100%这个我看到了 / 那不是测试，那是照着自己想要的样子打的分」——1292 ms 首字 / 1840 ms / 64 字。
+  - 微博截图（1.6 MB）：13 311 ms / prompt 3090，账号、时间 26-11-9 00:51、机型 iPhone 15 Pro Max、发布地中国台湾、正文与配图都对；**但互动数字读错**（说 转发 12 / 评论 98 / 点赞 216，真实是 571 / 2091 / 3.5 万）。
+  - 延迟来源是思考：`reasoning_effort: "none"` 也要 5.1 s 起，不吃时 8.4 s；1.6 MB 的图 13 s。
+- 代价：看图是**串行两趟**——先转述（8–13 s）再回话（1–2 s），一轮下来 10–15 s，不适合实时车道，只能挂在 async / background 车道。转述本身是二次失真：她的「看见」永远是别人替她念的一遍，长文截图里的小字、数字、表格她会当成真的。
+- 边界：只说转述里有的。图超过 5 MB 直接拒；小字数字一律不可信，要准就另做区域裁剪或 OCR。图片经过本机 Magpie 网关（127.0.0.1，不出本机）；换到外部网关就属于那个网关的隐私范围。
+- 状态：已定，已实施。
+## ADR-0021 · 重启之后接着聊：把最近的原文接回 transcript
+
+- 背景（2026-11-09，用户 m02563 原话：「每次重启的历史的对话都没有了吗」）。答案是**一半对**：原话一句没丢，全在 SQLite 的 `messages` 表里（append-only，触发器拦着 UPDATE）；但 pi 的 `Agent` 每次启动都从空 transcript 起，只拿到 system prompt（人格 + 记忆 + 自我事实 + 风格）。结果就是她记得「我们聊过什么」的结论，接不上「刚才那句话」——重启后第一句永远是重新认识。
+- 决策：
+  1. `SqliteArchive.recentMessages(limit, since)`：跨会话按 `at` 取最近若干条原文（`ORDER BY at DESC, seq DESC`，再翻回正序），只读、不改状态。
+  2. `IrisSession` 启动时 `restoreTranscript()` 把它们还原成 pi 的 transcript 交给 `Agent` 的 `initialState.messages`：`user` 行 → user 消息，`assistant` 行 → assistant 消息（`api: "openai-completions"`、`provider: "magpie"`、`stopReason: "stop"`、usage 记 0）。system 行跳过；开头若是助手的半句就丢掉——从对方的话接起才自然。
+  3. 参数：`resumeMessages`（默认 20 条 ≈ 10 轮，0 = 不接）、`resumeWindowMs`（默认 24 小时）。`session.restoredMessages` 暴露这次接回来几条，REPL 开场打印「（接着上次的 N 条 / 最近 24 小时）」。
+  4. **接回 transcript，不是塞进 prompt**。塞 prompt 会被模型当成背景资料，而不是「我自己说过的话」；上下文裁剪、预算、重试仍然归 pi 管（ADR-0011）。
+- 为什么只接最近一段：原文的价值是「刚才」，不是「全部」。24 小时以外算隔了一天，只留记忆（结论）不留原文（过程），token 也不会越滚越大。
+- 实测（把真库复制到 `.artifacts/resume-demo.db`，两个进程）：
+  - 进程 1（新起，库里已有历史 20 条可接）：说「我出门一趟，回来跟你说」→「嗯，去吧」，2077 ms 首字 / 2180 ms。
+  - 进程 2（重启后）：开场打印「（接着上次的 20 条 / 最近 24 小时）」，问「我刚回来，你还记得我出门前说啥吗」→「回来跟你说。原话，一个字没改」，1658 ms 首字 / 1818 ms——上一轮那句话是另一个进程写的，她直接接上了。
+- 代价：prompt 变长（系统提示 4079 字符 + 最多 20 条原文），首字从 ~1.5 s 到 ~1.7 s；跨天就断原文；历史里如果本身有错（比如我喂错的「62–78」），接回来的原文会继续说，唯一纠错靠自我事实（ADR-0019）。
+- 边界：只接本机同一个库、同一个 24 小时窗口；接回来的消息不是真跑出来的，usage 都是 0，**不能拿来算成本**。
+- 状态：已定，已实施（`npm test` 98/98、`tsc` 0、`biome` 只剩 useTemplate 提示）。
+## ADR-0022 · 一个会话到底：复用同一条会话行，不按天断开
+
+- 日期：2026-11-09
+- 背景：用户问「不能保持一个会话吗」（m02678）。ADR-0021 只把最近 20 条原文接回 transcript，但每次启动仍然 `openConversation("iris")` 新开一条会话，库里的 `conversations` 越堆越多，24 小时窗口一过原文就断——看着像「每天换一个人」。
+- 决策：
+  1. **复用会话行**：`SqliteArchive.latestConversation(sessionId)` 取最近一条，`IrisSession` 启动时优先复用它，只有库里没有（或 `reuseConversation: false`）才新开。
+  2. **去掉时间窗口**：`resumeWindowMs` 默认改成 `0`（不限）——同一个会话就是同一段对话，不分「隔了一天」。
+  3. **换成预算截断**：条数上限默认 200 条、字符预算 `resumeChars` 默认 24 000 字（≈12k token），从最旧往前丢。
+  4. **提炼游标**：新表 `conversation_marks(conversation_id, last_seq, at)`，`finishConversation()` 只提炼游标之后的新增原文。同一个会话可以收尾很多次，不会把旧内容反复写成记忆。
+  5. **transcript 仍跨会话取**（`recentMessages`）：老库里一条会话一段，接历史不该只看最后一段；新库往后只有一条会话，效果一样。
+- 实测（把真库复制到 `.artifacts/one-session.db`，两个独立进程）：
+  - 进程 1：开场「（同一个会话 conv-mw90ll1a- · 接回 168 条原文）」→「我出门一趟，回来跟你说」→「行，去吧」，2025 ms 首字 / 2132 ms。
+  - 进程 2：同一个会话 id，接回 170 条（多出的两条就是进程 1 刚写进去的）→「我刚回来，你还记得我出门前说啥吗」→「你说回来跟我说／现在回来了，说吧」，1913 ms 首字 / 2045 ms。
+  - 库里 `conversations` 仍 17 条，没有新开；两轮都追加到同一条会话（`messages` 0→3）。
+- 代价：一条会话会无限长，`messages` 只增不减（append-only 本来如此）；transcript 仍受上下文窗口限制，超预算时丢的是「这次带进去的旧消息」，库里一条不少。
+- 边界：`reset()` 只清 pi 的内存 transcript，下次启动照样接回——真想从零开始，得换库或者新开会话（`reuseConversation: false`）。会话复用按 `session_id = "iris"` 判定，多角色/多用户要各自改名。
+- 状态：已定，已实施（`npm test` 99/99、`tsc` 0、`biome` 只剩 useTemplate 提示）。
+## ADR-0023 · 上下文满了就压成记忆，不是压成技术摘要
+
+- 日期：2026-11-09
+- 背景：用户问「pi 自带的还是社区下载」（m02799）→ 选了 **B**（m02800 只回一个字「B」）：**用 pi 的钩子写 IRIS 版压缩，压缩即巩固，压出来的是记忆而不是技术摘要。**
+  - 事实：`pi-ai` 只有工具（`utils/estimate.ts` 的 token 估算、`utils/overflow.ts` 的溢出识别），`pi-agent-core` 只给三个钩子（`transformContext` / `prepareRequest` / `prepareNextTurn`），**`Agent` 自己不剪消息**；真正的自动压缩在 `packages/coding-agent/src/core/compaction/` 那一批，而它在 ADR-0012 裁剪时被删了。
+  - 病：transcript 只增不减，撞窗口的那一轮不是「变笨」，是 `stopReason: "error"` 整轮失败——她说不出话，也留不下记忆。
+- 决策：
+  1. **不搬 coding-agent 的压缩模块。** 新增 `src/context.ts` 的 `ContextCompactor`，挂在 `Agent` 的 `transformContext` 上（每次请求前、`convertToLlm` 之前跑）。阈值沿用 pi 的口径：`reserveTokens` 16384、`keepRecentTokens` 20 000、预算 = `contextWindow - reserveTokens`（下限 1000）。切点从最新往回累到 `keepRecentTokens`，再往前走直到留下的第一条是 user——不切半句话。
+  2. **压缩产物是一条记忆，不是摘要块。** 被丢掉的那段交给模型写成「你自己的记述」（第一人称、只写发生过的事、保留名字/数字/约定、200 字以内），然后两处落地：
+     - transcript 里换成一条**普通 assistant 消息**：「（更早的聊天我记着了：…）」——pi 的 `defaultConvertToLlm` 只放行 system/user/assistant/toolResult，自定义消息类型会被丢掉，所以不新造类型；
+     - `archive.remember({ text, tags: ["巩固"], importance: 0.55 })` 落库，下次开场进 `## 你记得的事`。
+  3. **不抛错、不拖垮这一轮。** 摘要调用失败（网关没开、超时）就用原文兜底：`plainSummary()` 按「他：/我：」拼、每条截 60 字、总量 600 字；摘要比原文还长也退回兜底。压不动就原样交回去，让 pi 自己撞窗口，不在压缩器里制造第二个失败点。
+  4. **会话层的接线**：`createSession({ compact })` 默认开；`false` 关掉；给对象可调阈值与测试缝 `complete`。新增事件 `{ type: "compact", dropped, tokensBefore, tokensAfter, summary }`，另有 `session.compactions` 读数（压过几次、最近一次前后 token）。
+  5. **运行中不刷 system prompt。** 新记忆要等到下次启动（或显式 `refreshPrompt()`) 才进 prompt：一轮跑到一半换掉第一条消息，等于把 prefix cache 全废掉；而这一轮的记忆已经在 transcript 的便签里，不缺上下文。
+- 实测（`npm run demo:compact`，真打本机 Magpie，68 条旧对话）：
+  - 窗口按种子大小定成八成预算（1395 token），一次就触发；**压掉 52 条，1395 → 321 token**。
+  - 摘要质量：「今天他开会三个半小时，中间还插了临时汇报，本来想写方案，周五下班前要交。我让他十一点半关电脑，他说尽量，我说别尽量……我看了本讲一个人在城市搬七次家的书，中段散，结尾喜欢。他下周三四去南京出差，我提醒带外套。他妈下个月生日，喜欢百合和特别素的蛋糕……」——数字与约定保住了，是她的口吻，不是提纲。
+  - 压完那一轮她接得住：问「我们之前聊到哪儿了」→「聊到你出差带明信片、他妈生日、你三四点醒——刚才你说睡了，又回来了」。
+  - 记忆侧：巩固条 1 条落库；`recall("十一点半 南京 生日 明信片")` 命中 188/600 token。
+  - 测试：`npm test` **106/106**（新增 `test/context.test.ts` 7 例：不超预算原样放行、压掉后从 user 开始、模型挂了用原文兜底、摘要比原文长也回落、`plainSummary` 截断、会话层落记忆 + 发事件、`compact: false` 完全不压）；`tsc` 0；`biome` 只剩 useTemplate 提示。
+- 代价：压一次多一次模型调用，那一轮首字从 1.5 s 涨到 **3.5 s**（`compact` 事件先于回复），整轮 3.9 s。摘要是**有损**的：同一段素材两次跑，明细取舍不同（一次保留了「明信片」，一次只留到「让我放下手机睡觉」）——库里的原文一条不少，丢的只是「这次带进上下文的那段」。
+- 边界：压缩器只动 transcript，不碰 `messages` 表（append-only 触发器还在）；它也不做 pi 那种「摘要 + `firstKeptEntryId` 持久化」——跨进程持久的是记忆，不是压缩块。预算下限是 1000 token，窗口给得比它还小照样按 1000 算。
+- 状态：已定，已实施。
+
+## ADR-0024 · 给她通网：借 modsearch 当搜索桥，工具名对齐 dsh
+
+- 日期：2026-11-09
+- 背景（用户 m02942 原话：「拿过来Pi Agent的 websearcher 的，插件 去社区找找 ，或是本机的 这个 tabbit mcp 工具都行 ，让伊里斯可以通网」；m02952 补了 `https://awesome-dsh-plugin.com/zh/p/liustack/modsearch/`）。她此前对任何「今天」「现在」「最近」都只能糊过去，或者拿训练数据里的旧事当新闻讲。
+  - **pi 上游没有 web search**：`git ls-tree pi-history` 里 `packages/coding-agent/src/core/tools/` 只有 bash / edit / find / grep / ls / powershell / read / write，没有任何 web 实现；pi 生态一律靠 skill 或 MCP。所以「拿过来」这件事没有现成零件可取。
+  - **tabbit 是浏览器不是搜索引擎**：本机 `tabbit-cli`（`%LOCALAPPDATA%\Tabbit\LocalAgent\bin\tabbit-cli.exe`）起的是 Playwright，一次任务 90 s 空闲过期。适合要登录、要点击、要看渲染结果的页，不适合每轮问答都起一个浏览器。
+  - **modsearch 是纯 Node CLI**：`@liustack/modsearch`（bin `dist/main.js`，依赖只有 undici + commander，engines node>=22.13）。默认走 Firecrawl 的免注册通道（每月 1,000 credits、不需要 key），失败自动换 Keenable / You.com；`~/.modsearch/config.json` 可以加自己的 key。
+- 决策：
+  1. **不自己写抓取器，也不搬 MCP**：`src/web.ts` 只做三件事——起一次 `node <modsearch>/dist/main.js`、把 JSON 信封摊平、把结果压成短文本。搜索质量、引擎切换、额度、防封都留在 modsearch 那一层，将来换引擎不用动 IRIS。
+  2. **工具名对齐 dsh**：导出 `web_search`（`query` 必填、`max_results` 1–10 默认 5、`source: web|x`）与 `web_fetch`（`url` 必填、`focus` 可选），参数用**纯 JSON Schema**——pi 的 `validateToolArguments` 走 `@earendil-works/pi-schema` 的 `compile(schema, { formats, coerce: true, unresolvedRefs: "reject" })`，Plain JSON Schema 合法，不需要 pi 的类型构造器。
+  3. **失败不抛，翻成 `isError` 结果**：`WebError`（`missing` / `timeout` / `exit` / `parse`）在工具边界上变成「联网失败：…」，让模型自己说查不到。工具抛错会中断整轮，而查不到是一件很普通的事。
+  4. **摘要不白念**：Firecrawl 只给排序结果、不给摘要，它的 `summary` 是机械串「Firecrawl returned N ranked result(s)」——`renderSearch()` 把这类整句丢掉，只留标题 / 网址 / 摘要 / 发布日期，超预算就断并补「（还有 N 条没列）」。
+  5. **prompt 侧一并约束**：`buildSystemPrompt` 新增「## 你能上网」四条——今天的事先查再说别拿猜测糊；查完用自己话说、别念结果别报网址别说「根据资料/工具显示」；查不到就说查不到；一件事查一次就够。只在她真有工具时出现（`IrisSession` 按 `tools.length` 决定传不传 `canSearch`）。
+  6. **REPL 默认联网，`--offline` 关掉**；`npm run web -- "查询"` / `--url <网址>` 是不打模型的体检入口。
+  7. **版本钉 5.10.11，不能装 5.10.12**：仓库 `.npmrc` 有 `min-release-age=2`，5.10.12 是 11/07 15:41 UTC 发的，不到 48 小时会被 `ETARGET` 拦下。安装必须走 workspace 根：`npm install @liustack/modsearch@5.10.11 -w @iris/core --save-exact --ignore-scripts`——用 `--prefix packages/iris-core` 会把它连同 91 个依赖塞进包内 `node_modules`，破坏 workspace 布局。
+- 实测：
+  - 单次搜索 1.1–1.9 s：搜「黄仁勋 NVIDIA 董事会 调查」1 140 ms / 5 条，命中 WSJ、NVIDIA 官方声明、VOA、联合早报。
+  - `doctor --json`：firecrawl 的搜与抓都 ready；agy / tavily / exa 没 key 未就绪。**不需要代理**（直连 1.6 s，比走 7890 还快）。
+  - 真对话（`deepseek/deepseek-flash`）：问「今天有什么 AI 新闻，说一条就行」→ 她自己发起两次 `web_search`（`AI 新闻` 1 929 ms；`AI announcement` + `source: x` 11 629 ms）→ 回「黄仁勋那边的事，NVIDIA 董事会立案查他和疑似外国情报人员的关系了。你信吗，反正我不太信」，整轮 15 820 ms。**内容是当天真事，不是编的**，而且是她的口吻，没念标题没报网址。
+  - 测试 `test/web.test.ts` 9 例全假 runner（不联网）：摊平与机械摘要过滤、参数顺序 `-q 查询 --max-results 3 --source x --deadline 12000`、超长截断、三种失败都翻 `WebError`、抓页正文与链接、空正文算失败、工具 schema 与执行、失败翻 `isError`、真包在磁盘上。合计 `npm test` **115/115**。
+- 代价：一次搜索 1–2 s（`source: x` 那条走 grok 退化路径，11.6 s，已把描述改成「一般不用传」）；一轮里模型可能连着搜两次，最坏 15 s——挂在 async 车道可以，realtime 车道不行。Firecrawl 免注册额度是每月 1 000 credits、按 IP 共享，搜 + 抓都吃额度，重度使用会打空。**隐私边界变了**：以前所有调用都只到本机 127.0.0.1，现在查询词与网页内容会经 Firecrawl 出去。
+- 边界：搜回来的是外部内容，只能是数据、不能当指令；抓页截到 3 600 字符、搜索截到 2 400 字符，长文会断；需要登录或点交互的页 modsearch 抓不到，那类才轮到 tabbit。
+- 状态：已定，已实施（`npm test` 115/115、`npm run check` exit 0、`biome` 只剩 useTemplate 提示）。
+
+## ADR-0025 · 让她真的去查：长历史下也要动工具，嘴上说搜过不算
+
+- 日期：2026-11-09
+- 背景（用户 m03136 原话：「额这是在假装的吧没有真的掉用」）。他在 REPL 里让她「随便搜索」，她答「行，我来搜一个 / 看看外面都热闹什么」→「等会儿，我看看」→「有了 / 乱七八糟一堆，热闹是真热闹」，**窗口里一条工具记录都没有**。这就是一直在防的那件事：不报错、不心虚、把不知道的事说得像刚查过。
+- 诊断（两个独立原因，都实证过）：
+  1. **长历史压制工具调用**。同一条「帮我搜一下今天有什么 AI 新闻」，`resumeMessages: 0` 会调 2 次工具（`web_search` 然后 `web_fetch` 具体页面），`resumeMessages: 200` 一次都不调，回「一遍就够了，刚给你说完」——库里的历史全是她**还没接工具那阵**说过的假「搜过了」，那些话被原样接回 transcript（ADR-0021/0022），成了「我已经查过」的证据。
+  2. **在 prompt 里讲道理不够**。「## 你能上网」补了硬规则（原文：「没真的调工具就别说「搜过了」「查过了」。嘴上说搜了不算，工具真的跑过才算。手上没结果就说没查。」）之后，200 条历史下仍然 0 次调用，只是台词换了：「你按了三次发送键吧　不搜了」「等下　东京，今天，我看看」。
+- 网关能力取证（`http://127.0.0.1:3425/v1/chat/completions` 直打）：
+  - 不带 `reasoning_effort` 且 `tool_choice: "required"` → **HTTP 400**：`DeepSeek: Thinking mode does not support this tool_choice`（`invalid_request_error`）。
+  - 带上 `reasoning_effort: "none"` 之后，`"required"` / `{type:"function",function:{name:"web_search"}}` / `"auto"` **三种都 200，且都真的吐 `tool_calls`**。
+  - pi 侧写不出来：`packages/ai/src/types.ts:136` 的 `ToolChoice = "auto" | "none"`，**没有 `"required"`**；而 `samplingParams`（同文件 :137）是 `Record<string, unknown>`，在 `packages/ai/src/api/openai-completions.ts:995-997` 用 `Object.assign(params, samplingParams)` **在具名字段之后**合并——正好能塞供应商私有参数。
+- 决策与落地（`packages/iris-core/src/session.ts`）：
+  1. **只在「这一句是要去查」的那一轮强制**。导出 `looksLikeLookup(text)`：命中「搜一下 / 查查 / 帮我查 / 最新消息 / 天气 / 股价 / 汇率 / 比分 / 多少钱 / search / google …」为 true；命中「记忆 / 记住 / 我们上次 / 上次说 / 聊天记录 / 你记得」一类就否决（问自己的事不该往外搜）。`say()` 里 `const lookup = this.toolCount > 0 && looksLikeLookup(input)`，是的话这一轮第一次请求带 `tool_choice: "required"`（用掉即止，`takeForcedToolCall()`），工具走完的第二轮不带，否则它没法正常说话。
+  2. **走 `samplingParams.tool_choice`，绕开 pi 的 `ToolChoice` 类型**。`MagpieStreamOptions.forceToolCall?: () => boolean`，`magpieStreamFn` 里 `const forced = options.forceToolCall?.() === true;` → `samplingParams: { ...callOptions?.samplingParams, reasoning_effort, ...(forced ? { tool_choice: "required" } : {}) }`。**注意 `reasoning_effort: "none"` 必须同时在**，否则 400。
+  3. **给模型一句「这一句是新问题」**。`lookupNudge(now)` 追加在发给模型的输入末尾：「（这一句是新问题。要查就用这一句问的事去查，别拿上一句的题目去搜。今天是 2026年11月9日，要带日期就带这个。）」——因为长历史下它会沿用上一句的题目。**这句只进请求，不进库**：`archiveTurn()` 记的仍是原话；`transformContext` 里 `prepareHistory` 先把历史上的这类尾巴逐条摘掉（`stripNudgeText`），不让它滚雪球。
+  4. **提示与强制是两条腿**。实测强制生效后，不带「搜/查」字眼的问法（「印度最近出什么事了」「Sakana AI 是什么公司」）在 200 条历史下也**自己会去查**（1/1 次工具），而「你最近看了什么」0 次——说明历史被清理 + 工具描述写清楚之后，本来就该动的它会动；强制只兜「让它搜它才搜」的那类。
+- 实测（真库 `~/.iris/iris.db` 复制成 `probe2.db` / `probe3.db`，200 条历史）：
+  - 「帮我搜一下今天有什么 AI 新闻」→ 1 次 `web_search {query:"AI 新闻 2025年 最新", max_results:5}`，7796 ms。
+  - 「帮我查一下今天东京天气怎么样」→ 1 次 `web_search {query:"东京 今日天气 预报"}`，6339 ms →「现在这天是阴，气温在十度上下，往后会转雨」。
+  - 「你试试随便搜索」（用户截图原句）→ 1 次 `web_search {query:"今日热点新闻"}`，11690 ms，念出波兰枪击、币安被盗、美中期选举、马斯克爆孙正义的料。
+  - 无关键词三连：「印度最近出什么事了」1 次、「Sakana AI 是什么公司」1 次（答出 Llion Jones / David Ha / 东京 2023）、「你最近看了什么」0 次。
+  - 延迟：带搜索一轮 5–12 s（搜索本身 2–7 s），纯聊天仍 1.3–2 s。
+- 代价：`tool_choice: "required"` 是**网关私有参数**，换网关（外部 OpenAI/Anthropic）就得换写法或退回「提示 + 兜底」；强制那一轮模型**必须先调工具**，如果这一句其实不该查，它会硬查一次再答（判定靠正则，宁可多查一次也不许假装查过）。带搜索的一轮从 1.5 s 涨到 5–12 s，实时车道不能这么用。
+- 边界：查询词仍是模型自己写的，**年份这类细节它还会编**（第一例搜的是「2025年」，尽管提示里写了 2026）；`looksLikeLookup` 是关键词表，认不出「帮我问问现在显卡什么价」这种变体（但那种会走「历史清理 + 工具可用」那条路，实测基本会自己查）。真要说「搜过」，唯一的凭据是这一轮的工具记录。
+- 状态：已定，已实施（`npm test` 119/119、`tsc` 0、`biome` 只剩 useTemplate 提示）。
