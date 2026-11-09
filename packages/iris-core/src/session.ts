@@ -15,6 +15,8 @@ import type { AssistantMessage, SimpleStreamOptions } from "@earendil-works/pi-a
 import { createInitialSystemMessage, toToolDeclaration } from "@earendil-works/pi-ai";
 import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
+import type { MemoryRecord, RawTurn, RecallOptions, RecallResult, SqliteArchive, TierDecision } from "./archive.ts";
+import { renderMemories } from "./archive.ts";
 import type { InMemoryMemoryStore } from "./memory.ts";
 import { LOCAL_API_KEY, MAGPIE_REASONING_EFFORT, type ModelReasoningEffort, magpieModel } from "./model.ts";
 import { buildSystemPrompt } from "./persona.ts";
@@ -22,6 +24,7 @@ import type { Episode, Persona, PersonaState, Relationship } from "./types.ts";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_RECENT = 5;
+const DEFAULT_MEMORY_LIMIT = 6;
 
 /** pi 的 usage 归一化后的三个计数。 */
 export interface IrisUsage {
@@ -76,8 +79,12 @@ export interface IrisSessionOptions {
 	state?: PersonaState;
 	relationship?: Relationship;
 	memory?: InMemoryMemoryStore;
+	/** 原文归档 + 三档记忆（ADR-0014）。给了就在每轮结束后把原文落库。 */
+	archive?: SqliteArchive;
 	/** 重建 system prompt 时回看的记忆条数。默认 5。 */
 	recentLimit?: number;
+	/** 开场注入的长期记忆条数（重要档优先）。默认 6。 */
+	memoryLimit?: number;
 	/** 网关模型 id，默认 `deepseek/deepseek-flash`。 */
 	model?: string;
 	/** 网关根地址，含 `/v1`。 */
@@ -163,7 +170,10 @@ export class IrisSession {
 
 	private readonly persona: Persona;
 	private readonly memory: InMemoryMemoryStore | null;
+	private readonly archive: SqliteArchive | null;
+	private conversationId: string | null = null;
 	private readonly recentLimit: number;
+	private readonly memoryLimit: number;
 	private readonly episodeTags: readonly string[];
 	private readonly clock: () => number;
 	private readonly listener: ((event: IrisSessionEvent) => void) | undefined;
@@ -177,7 +187,9 @@ export class IrisSession {
 	constructor(options: IrisSessionOptions) {
 		this.persona = options.persona;
 		this.memory = options.memory ?? null;
+		this.archive = options.archive ?? null;
 		this.recentLimit = options.recentLimit ?? DEFAULT_RECENT;
+		this.memoryLimit = options.memoryLimit ?? DEFAULT_MEMORY_LIMIT;
 		this.episodeTags = options.episodeTags ?? ["对话"];
 		this.clock = options.clock ?? Date.now;
 		this.listener = options.onEvent;
@@ -196,6 +208,7 @@ export class IrisSession {
 			streamFn: options.streamFn ?? magpieStreamFn(options),
 		});
 		this.agent.subscribe((event) => this.forward(event));
+		this.conversationId = this.archive?.openConversation("iris", this.clock()) ?? null;
 	}
 
 	get model(): string {
@@ -320,9 +333,27 @@ export class IrisSession {
 			turn.episode = episode;
 		}
 
+		this.archiveTurn(input, text, at);
 		emit({ type: "turn_end", turn });
 		this.hook = null;
 		return turn;
+	}
+
+	/**
+	 * 会话结束：按三档分类并把提炼条写进库（ADR-0014）。
+	 * 没有归档层就返回 null，调用方不必分支。
+	 */
+	async endConversation(): Promise<{ tier: TierDecision; memories: readonly MemoryRecord[] } | null> {
+		if (this.archive === null || this.conversationId === null) return null;
+		const result = await this.archive.finishConversation(this.conversationId);
+		this.conversationId = null;
+		return result;
+	}
+
+	/** 需要回忆时才查（工具调用的落点）。没有归档层就返回 null。 */
+	recall(query: string, options?: RecallOptions): RecallResult | null {
+		if (this.archive === null) return null;
+		return this.archive.recall(query, options);
 	}
 
 	/** 打断当前这一轮（用户插话、关窗）。 */
@@ -336,14 +367,38 @@ export class IrisSession {
 		this.agent.reset();
 	}
 
+	/** 原文落库：不脱敏的事交给 archive，这里只负责把这一轮原样交过去。 */
+	private archiveTurn(input: string, reply: string, at: number): void {
+		if (this.archive === null || this.conversationId === null) return;
+		const turns: RawTurn[] = [
+			{ role: "user", content: input, at },
+			{ role: "assistant", content: reply, at },
+		];
+		this.archive.appendTurns(this.conversationId, turns);
+	}
+
 	private buildPrompt(): string {
+		const now = this.clock();
+		const remembered = this.remembered(now);
 		return buildSystemPrompt({
 			persona: this.persona,
 			state: this.state,
 			relationship: this.bond,
 			recent: this.memory?.recent(this.recentLimit) ?? [],
-			now: this.clock(),
+			...(remembered.length === 0 ? {} : { memories: remembered }),
+			now,
 		});
+	}
+
+	/**
+	 * 开场注入：把库里重要档与最近确认过的记忆带进 system prompt（ADR-0014 检索时刻①）。
+	 * 没有归档层时为 0 条，行为与之前完全一致。
+	 */
+	private remembered(now: number): readonly string[] {
+		if (this.archive === null) return [];
+		const rows = this.archive.essential(this.memoryLimit);
+		if (rows.length === 0) return [];
+		return renderMemories(rows, now).split("\n");
 	}
 
 	private emit(event: IrisSessionEvent): void {

@@ -7,6 +7,8 @@ export interface PromptContext {
 	state: PersonaState;
 	relationship: Relationship;
 	recent: readonly Episode[];
+	/** 长期记忆条目，已渲染成一行一条（`renderMemories` 的输出）。 */
+	memories?: readonly string[];
 	now: number;
 }
 
@@ -73,6 +75,12 @@ export function buildSystemPrompt(context: PromptContext): string {
 	);
 	lines.push(`- 相处方式：${stage.tone}`);
 	lines.push("");
+	const memories = context.memories ?? [];
+	if (memories.length > 0) {
+		lines.push("## 你记得的事");
+		for (const memory of memories) lines.push(memory);
+		lines.push("");
+	}
 	if (context.recent.length > 0) {
 		lines.push("## 你们最近一起经历的");
 		for (const episode of context.recent) {

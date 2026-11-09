@@ -12,8 +12,11 @@
 		"@earendil-works/pi-ai": "1.5.0"
 	},
 	"scripts": {
-		"test": "node --test test/persona.test.ts test/memory.test.ts test/attention.test.ts test/consent.test.ts test/initiative.test.ts test/session.test.ts",
+		"test": "node --test test/archive.test.ts test/distill.test.ts test/persona.test.ts test/memory.test.ts test/attention.test.ts test/consent.test.ts test/initiative.test.ts test/session.test.ts",
 		"live": "node examples/live-turn.ts",
-		"demo": "node examples/demo-day.ts"
+		"demo": "node examples/demo-day.ts",
+		"demo:archive": "node examples/archive-day.ts",
+		"remember": "node examples/remember.ts",
+		"demo:llm": "node examples/llm-memory.ts"
 	}
 }

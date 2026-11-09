@@ -8,7 +8,14 @@ import { test } from "node:test";
 import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, normalizeContext } from "@earendil-works/pi-ai";
-import { createSession, InMemoryMemoryStore, IrisSessionError, magpieModel, magpieStreamFn } from "../src/index.ts";
+import {
+	createSession,
+	InMemoryMemoryStore,
+	IrisSessionError,
+	magpieModel,
+	magpieStreamFn,
+	SqliteArchive,
+} from "../src/index.ts";
 import type { Persona } from "../src/types.ts";
 
 const PERSONA: Persona = {
@@ -205,4 +212,58 @@ test("magpieStreamFn 不抛：连不上网关也只在流里报错", async () =>
 
 	assert.ok(types.includes("error"));
 	assert.equal(final.stopReason, "error");
+});
+
+test("归档：一轮对话落进 SQLite，结束时按三档分类", async () => {
+	const archive = new SqliteArchive({ path: ":memory:" });
+	const session = createSession({ persona: PERSONA, streamFn: scripted(["那就不说。"]), archive });
+
+	await session.say("今天下班有点累，不太想说话");
+	assert.equal(archive.stats().messages, 2, "原文应已落库");
+
+	const finished = await session.endConversation();
+	assert.ok(finished);
+	assert.equal(finished.tier.tier, "ordinary");
+	assert.equal(finished.memories.length, 1);
+
+	const found = session.recall("累");
+	assert.ok(found);
+	assert.ok(found.hits.length >= 1);
+	assert.ok(found.text.includes("累"));
+});
+
+test("归档：用户明确要求记住 → critical 且 locked", async () => {
+	const archive = new SqliteArchive({ path: ":memory:" });
+	const session = createSession({ persona: PERSONA, streamFn: scripted(["好，记下了。"]), archive });
+
+	await session.say("记住这个：我对花生过敏");
+	const finished = await session.endConversation();
+	assert.ok(finished);
+	assert.equal(finished.tier.tier, "critical");
+	assert.equal(finished.memories[0]?.status, "locked");
+	assert.equal(finished.memories[0]?.expiresAt, null);
+});
+
+test("没有归档层时 recall / endConversation 返回 null，不抛", async () => {
+	const session = createSession({ persona: PERSONA, streamFn: scripted(["嗯。"]) });
+	await session.say("在吗");
+	assert.equal(session.recall("在吗"), null);
+	assert.equal(await session.endConversation(), null);
+});
+
+test("开场注入：库里上次留下的重要记忆进 system prompt", async () => {
+	const archive = new SqliteArchive({ path: ":memory:" });
+	await archive.ingest({
+		sessionId: "iris",
+		turns: [
+			{ role: "user", content: "记住这个：我对花生过敏", at: 0 },
+			{ role: "assistant", content: "记下了。", at: 1000 },
+		],
+	});
+	const session = createSession({ persona: PERSONA, streamFn: scripted(["嗯。"]), archive });
+
+	const prompt = session.systemPrompt;
+	assert.ok(prompt.includes("你记得的事"));
+	assert.ok(prompt.includes("花生"));
+	await session.endConversation();
 });

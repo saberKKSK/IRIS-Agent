@@ -105,3 +105,51 @@
 - 提交作者固定为 `saberKKSK <saberKKSK@users.noreply.github.com>`（此前记在 `Vera <2792069779@qq.com>`，对应登录名 LIANGJING7，不是本仓库的账号）。
 - 代价：旧仓库的 332 个 pi 版本 tag 与完整上游历史不再出现在公开仓库；需要时从 `IRIS-Agent-archive` 或 `upstream` 取。
 - 状态：已定。
+
+## ADR-0014 · 记忆层不复用 Hermes 式记事本：原文永久归档 + 三档生命周期 + 双时间轴
+
+- 背景（2026-11-09，用户提出）：① 整段对话原文落地存档、永不丢；② AI 自动标注「普通 / 中等 / 重要」；③ 分档处理——普通档原文保留、提炼条到期自动清理；中等档 AI 提炼后**给用户过一眼**、确认后才入库；重要档 **AI 只读**、只能人工改。
+- 决策：
+  1. **原文永久归档**：`messages` 表 append-only（SQLite 触发器禁止 UPDATE/DELETE），写入前过一遍脱敏（`sk-`、16 位以上数字串、`密码[:：]`、邮箱）；唯一删除口是人工执行的 `/forget <conversationId>`：
+  2. **三档生命周期**：`ordinary`（30 天 TTL，到期只删提炼条、不碰原文）/ `medium`（`active`，永不自动过期）/ `critical`（直接 `locked`，AI 读得到、写不了，永不自动过期）。原设计的「中等待人工确认」已由 ADR-0016 取消。
+  3. **critical 的判定必须「提议 + 条件成立」**：用户当场说过「记住这个 / 这个很重要」、或用户手动提升、或 30 天内被提到 ≥3 次。理由：critical 不可删不可过期，一次误判就是永久错误 —— 所以 AI 判「不重要」要松、判「重要」要紧。
+  4. **tier 可升级**：ordinary 被反复命中（≈5 次/月）由 `sweep()` 自动升到 medium、去掉过期时间（原设计是「提议升级」，ADR-0016 改成直接升）。
+  5. **AI 改 critical 只能提申请**：写入 `memory_edits` 并进同一队列，不能直接生效。
+- 为什么不复用 Hermes Agent（NousResearch）的机制：它的记忆是「工作助手的记事本」——`MEMORY.md`（2200 字符）+ `USER.md`（1375 字符）两个纯文本、会话开始冻结注入 system prompt、agent 自己 `add/patch/remove`、超限报错逼模型自己腾地方，人工闸门 `write_approval` 只是可选开关。它没有原文永久归档、没有时间轴、只有一档。对编码助手够用，对陪伴角色不够：**改错记忆在角色身上不是改错笔记，是人格漂移**。
+- 反过来抄它三条工程细节：
+  1. **冻结快照保 prefix cache**：会话内不重写 system prompt，新记忆走工具结果进 transcript（当前 `refreshPrompt()` 每改状态就重写第一条 system 消息，会打断缓存，首字从 ~950 ms 掉到 ~1500 ms 以上，必须改）；
+  2. **把预算反馈给模型**：`recall()` 返回 `budget:{used,limit}`，而不是悄悄截断；
+  3. **写入必须回读校验**：Hermes 文档第一大 troubleshooting 就是「模型说存了其实没存」，所以 `remember()` 返回 `{status:"queued",id,readback:true}`。
+- 外部依据：Hermes 文档（[Persistent Memory](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory)、[Memory Providers](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers)）；[ACL GEM 2026《Is GraphRAG Needed?》](https://aclanthology.org/2026.gem-main.40/)（上下文工程省 19%–53% token，且存在 retrieval-generation gap）；YouTube 2026 下半年共识（GraphRAG 只在多跳场景赢、记忆层是主角、出现 Vectorless RAG 一派）。
+- 落地（2026-11-09，`packages/iris-core/src/archive.ts`）：五张表（conversations / messages / memories / memory_fts / memory_edits + maintenance 窗口；原 review_queue 已按 ADR-0016 删除）、脱敏、规则分档、待复核、过期清理、无向量检索全部可用；库默认 `~/.iris/iris.db`（`IRIS_ARCHIVE` 可覆盖，`defaultArchivePath()`），会话开场由 `SqliteArchive.essential()` 注入（重要档优先，只读、不累加命中）。实测同一库文件跨进程：先写「记住这个：我对花生过敏」→ 分档 critical/locked，重启后 system prompt 里出现「· [今天 · 重要] …（原话：「记住这个：我对花生过敏」）」。
+- LLM 分档与提炼（2026-11-09，`packages/iris-core/src/distill.ts`）：`llmClassifier()` / `llmDistiller()` / `llmMemory()` 共用一条 Magpie 补全（`streamSimple` + `temperature 0` + `reasoning_effort none` + 20 s 超时 + 不重试）。三条约定：① 输出必须是 JSON，`tier` 走白名单，`quote` 不在原文里就丢掉，text 截 60 字、最多 5 条；② 失败（超时 / 坏 JSON / 空回复）一律返回 `undefined`，由 `archive.ts` 回落规则档与兜底摘要——记忆链路不因网关抽风停摆；③ 分档「宁可判低」，因为 critical 一旦入库就只能人工改。实测同一段四轮对话（`node examples/llm-memory.ts`）：规则版入库的是整段流水（148 字），模型版是三条短事实（「我对花生过敏，不能吃带花生的东西。」「宫保鸡丁含花生，以后不再提这道菜。」「这周连着加班，周六想在家躺着休息。」），每条都带原文子串作证据；档位都是 critical，来源从 `rule` 变 `model`；两次模型调用合计 4.4 s（只在会话结束/归档时跑，不进实时车道）。
+- 尚未落地：检索时刻①的「最近 N 轮原文窗口」只注入了提炼条；`refreshPrompt()` 重写 system 消息会打断 prefix cache（ADR 里那条「冻结快照」还欠实现）；模型分档/提炼只在归档时跑，会话进行中不预判档位、也不做实体归并。
+- 状态：已定，主体已实施。
+
+## ADR-0015 · 检索先不建向量库：FTS5 单字 + 二元组 + 实体加权 + RRF
+
+- 背景：用户明确「向量库先不看」，问没有向量时 Agent 怎么检索。本机 Magpie `GET /v1/models` 共 14 个模型、无任何 embedding 端点（2026-11-09 实测），要本地嵌入就得先引 Python sidecar。
+- 决策：检索拆三个时刻 + 四路召回，先不引入任何向量组件。
+  - **三个时刻**：① 每轮开场零查询固定注入（critical ≤5 条 + 最近 N 轮原文窗口）；② 对话中由 agent 自己决定是否调工具；③ 轮末/夜间巩固（分类、提炼、实体归并、过期清理）。
+  - **四路召回 + RRF**（`score = Σ 1/(60 + rank_i)`，不调权重）：A 词法主力（FTS5，**单字与二元组都入索引**，查询用 `OR` 连接、`bm25()` 排序）；B 实体（命中 `nodes.name/aliases` → 1 跳邻居 → 关联 episode）；C 时间/层级过滤；D 可选改写（flash 生成 3 个检索词，后台异步，首轮为空才等）。
+  - **打分**：二元组命中 ×2 + 单字命中 ×1，只靠单字命中的排最后或丢弃（单字 OR 的噪声实测明显）。
+- 实测（2026-11-09，5 条中文 episode，`node:sqlite` 内存库）：单字+二元组 OR 查询 + `bm25()` 排序，延迟 **0.08–0.32 ms**；`有点累` 命中「今天下班有点累」排第一；`看海` 命中共「一起去**看了**海」（纯二元组会漏，必须单字兜底）；`猫`、`国庆回家` 均命中；`出去走走` 出现噪声。
+- 检索结果注入：每条带时间与出处、critical 放最前、总长封顶 600 tokens（约 8k prompt 的 7%）；超预算按「ordinary → 最旧 → 同实体合并」砍。
+- 无向量时补语义缺口五件事：别名表 + 实体归并、单字兜底、tag 过滤、图邻居扩展、**召回为空就诚实说没找到**（让 agent 直接问用户，好过编造）。
+- 评测（不靠检索指标自嗨，论文明确的坑）：20 条真实问题人工判三个数——召回成功率、**错引率**（比召回率更重要）、答对率。
+- 迁移条件（any):召回成功率或错引率在不达标区间、记忆量 > 5 万条、或需要跨语言语义召回。届时：本地 bge-m3 sidecar 生成向量，**向量直接存 SQLite BLOB、Node 里暴力余弦**（10k 条 × 1024 维 ≈ 40 MB），不引向量数据库（避免"换模型要重新嵌入"和"备份变两个文件"）。
+- 状态：已定，实施中。
+
+## ADR-0016 · 记忆链路不设人工确认：写进来就生效（对齐 Hermes）
+
+- 背景（2026-11-09，用户原话：「不要有人的确认参与，参考 hermes，用户端是无感的」）：ADR-0014 原本让中等档进 `review_queue` 等人工点一次确认。这条被否掉——陪伴型智能体的使用者不该被拉来当数据库管理员。
+- 决策：
+  1. **没有审批环节**：`pending_review` 状态与 `review_queue` 表一起删除。三档写入即生效：`ordinary`（30 天 TTL）/ `medium`（`active`，永不过期）/ `critical`（`locked`，AI 只读）。
+  2. **升级自动**：普通档被反复命中（默认 5 次/月）由 `sweep()` 直接升成 medium 并去掉过期时间，不再生成「要不要升级」的提议。critical **不会**由命中次数自动产生——它只来自「用户明确要求记住」，否则一次误判就是永久锁定。
+  3. **修正照旧可能，只是不需要等待**：`amend(id, text)` 改正文（落 `memory_edits` 审计）、`promote(id)` 升为 locked、`drop(id)` 作废、`forget(conversationId)` 删整段原文，都是直接操作，改完立刻对检索生效。没有「申请—批准」两阶段。
+  4. **历史库兼容**：老库里 `status='pending_review'` 的行读出来按 `active` 处理（`asStatus`），旧 `review_queue` 表留着不动，不需要迁移脚本。
+- 依据：Hermes Agent 的 `write_approval` 是可选项、默认关闭——记忆由 agent 写完就算数，用户端看不到确认提示；我们连这个开关都不留。
+- 代价：模型判错档位时没有人兜底，所以「宁可判低」更吃重（critical 判高 = 永久锁定）。缓解：`essential()` 只注入重要档与最近确认的记忆、召回为空就诚实说没找到；真要改，`amend` / `drop` 随时可用，只是不打断对话。
+- 实测（2026-11-09，`npm run demo:archive`）：四段会话落库后立刻可检索（「看海」1.30 ms /「花生」0.28 ms /「累」0.24 ms，各 1 条）；命中 5 次的普通档自动变 `medium/active`、`expires_at=NULL`；31 天后普通档过期 1 条而原文 2 条仍在；`amend` → `promote` → `drop` 三步直接生效。`npm test` 65/65。
+- 状态：已定，已实施。
+
