@@ -1,0 +1,21 @@
+node_modules
+dist/
+.artifacts/
+*.log
+.DS_Store
+*.tsbuildinfo
+packages/*/dist/
+packages/ai/src/providers/data/
+packages/ai/src/providers/.model-generation-*/
+*.cpuprofile
+
+# Environment
+.env
+
+# Editor files
+.vscode/
+.zed/
+.idea/
+*.swp
+*.swo
+*~

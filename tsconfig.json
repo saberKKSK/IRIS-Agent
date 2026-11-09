@@ -1,0 +1,21 @@
+{
+	"extends": "./tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+		"paths": {
+			"@earendil-works/pi-telemetry": ["./packages/telemetry/src/index.ts"],
+			"@earendil-works/pi-telemetry/testing": ["./packages/telemetry/src/testing/index.ts"],
+			"@earendil-works/pi-schema": ["./packages/schema/src/index.ts"],
+			"@earendil-works/pi-schema/formats": ["./packages/schema/src/formats/index.ts"],
+			"@earendil-works/pi-ai": ["./packages/ai/src/index.ts"],
+			"@earendil-works/pi-ai/oauth": ["./packages/ai/src/oauth.ts"],
+			"@earendil-works/pi-ai/*": ["./packages/ai/src/*.ts", "./packages/ai/src/providers/*.ts"],
+			"@earendil-works/pi-agent-core": ["./packages/agent/src/index.ts"],
+			"@iris/core": ["./packages/iris-core/src/index.ts"]
+		}
+	},
+	"include": ["packages/*/src/**/*", "packages/*/test/**/*", "packages/ai/catalog/**/*"],
+	"exclude": ["**/dist/**"]
+}

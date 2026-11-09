@@ -1,0 +1,19 @@
+{
+	"name": "@iris/core",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "IRIS companion runtime core: persona state, episodic memory, three-lane attention, consent gate, initiative, pi-agent session",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@earendil-works/pi-agent-core": "1.5.0",
+		"@earendil-works/pi-ai": "1.5.0"
+	},
+	"scripts": {
+		"test": "node --test test/persona.test.ts test/memory.test.ts test/attention.test.ts test/consent.test.ts test/initiative.test.ts test/session.test.ts",
+		"live": "node examples/live-turn.ts",
+		"demo": "node examples/demo-day.ts"
+	}
+}

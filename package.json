@@ -1,0 +1,24 @@
+{
+	"name": "iris",
+	"private": true,
+	"type": "module",
+	"workspaces": [
+		"packages/*"
+	],
+	"scripts": {
+		"build": "npm --prefix packages/telemetry run build && npm --prefix packages/schema run build && npm --prefix packages/ai run build && npm --prefix packages/agent run build",
+		"build:offline": "npm --prefix packages/telemetry run build && npm --prefix packages/schema run build && npm --prefix packages/ai run build:offline && npm --prefix packages/agent run build",
+		"check": "npx biome check packages/iris-core && npx tsc -p packages/iris-core/tsconfig.check.json",
+		"test": "npm --prefix packages/iris-core run test",
+		"live": "npm --prefix packages/iris-core run live",
+		"demo": "npm --prefix packages/iris-core run demo"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.3.5",
+		"@types/node": "22.19.19",
+		"typescript": "7.0.2"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}
