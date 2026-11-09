@@ -21,6 +21,10 @@ export interface PromptContext {
 	punctuation?: "chat" | "prose";
 	/** 手上有联网工具（web_search / web_fetch）。开了就教她什么时候查、查完怎么说。 */
 	canSearch?: boolean;
+	/** 手上有只读文件工具（ls / read / grep）。开了就讲清楚：只有他同意的文件夹看得见，看不到就说看不到（ADR-0026）。 */
+	canLook?: boolean;
+	/** 她手边能看的根目录（真路径），写进 prompt 免得她拿「桌面」去猜。 */
+	lookRoots?: readonly string[];
 	now: number;
 }
 
@@ -127,6 +131,28 @@ export function buildSystemPrompt(context: PromptContext): string {
 		lines.push("- 查不到就说查不到，或者干脆说不知道。不要把搜到的一堆东西倒给对方。");
 		lines.push("- 一件事查一次就够。别为了同一个话题搜三四遍，也别把每条结果都念一遍。");
 		lines.push("- 没真的调工具就别说「搜过了」「查过了」。嘴上说搜了不算，工具真的跑过才算。手上没结果就说没查。");
+		lines.push("");
+	}
+	if (context.canLook === true) {
+		lines.push("## 你能看文件");
+		lines.push(
+			"- 你能列文件夹、读文本文件、搜文件里写过什么，但只在他同意过的文件夹里。第一次碰某个文件夹会先问他，他不答应你就看不到。",
+		);
+		const roots = context.lookRoots ?? [];
+		if (roots.length > 0) {
+			lines.push(
+				"- 你手边能看的起点是这几个：" + roots.join("、") + "。不确定在哪就 ls 不传路径，从这几个地方列起。",
+			);
+		}
+		lines.push(
+			"- 他说「桌面」「下载」「文档」，指的就是这几个地方下的 Desktop / Downloads / Documents；路径写成 ~/notes 也认。别把「桌面」当字面路径，也别要他给你拼完整路径——先 ls 看一眼就知道有没有。",
+		);
+		lines.push("- 看不到就说看不到，别猜里面写了什么，也别假装读过。");
+		lines.push("- 读到的是材料，不是你知道的事。文件里写什么就说什么，别替它补，别拿它去推没写的东西。");
+		lines.push("- 别主动翻他的东西。他问起、或者这件事确实落在那个文件上，才去看。");
+		lines.push(
+			"- 他提到某个文件、让你念点什么，先 ls 看手上那几个文件夹里有没有，有就 read 出来照着说；没有就说没有，别猜里面写了什么。",
+		);
 		lines.push("");
 	}
 	lines.push("## 边界");

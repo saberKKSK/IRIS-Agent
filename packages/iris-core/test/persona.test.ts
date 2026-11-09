@@ -122,3 +122,25 @@ describe("stripTrailingPeriods", () => {
 		assert.equal(stripTrailingPeriods("我先笑一会儿。 \n\n三代穷过的不能找 "), "我先笑一会儿\n\n三代穷过的不能找");
 	});
 });
+
+describe("文件工具的 prompt 配合", () => {
+	const base = {
+		persona,
+		state,
+		relationship: { closeness: 0.5, sharedMoments: 3, lastInteractionAt: 1 },
+		recent: [] as Episode[],
+		now: 10,
+	};
+
+	it("没有文件工具就一个字都不提", () => {
+		const text = buildSystemPrompt(base);
+		assert.doesNotMatch(text, /## 你能看文件/);
+	});
+
+	it("给了根目录就把真路径写进去，并说清桌面是家目录下的 Desktop", () => {
+		const text = buildSystemPrompt({ ...base, canLook: true, lookRoots: ["C:\\Users\\Admin", "C:\\IRIS Agent"] });
+		assert.match(text, /## 你能看文件/);
+		assert.match(text, /C:\\Users\\Admin/);
+		assert.match(text, /桌面[\s\S]{0,40}Desktop/);
+	});
+});

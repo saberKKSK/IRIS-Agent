@@ -139,6 +139,8 @@ export interface IrisSessionOptions {
 	compact?: boolean | CompactionOptions;
 	/** 交给 pi 的工具；Phase 1 默认空。 */
 	tools?: AgentTool[];
+	/** 只读文件能看的根目录（真路径）。给了就写进 prompt，免得她拿「桌面」当字面路径去猜。 */
+	lookRoots?: readonly string[];
 	/** 写回记忆的默认标签。 */
 	episodeTags?: readonly string[];
 	/** 时间源，测试可注入。 */
@@ -314,8 +316,10 @@ export class IrisSession {
 	private readonly resumeChars: number;
 	private readonly reuseConversation: boolean;
 	private readonly compactor: ContextCompactor | null;
-	/** 手上有几个工具。有工具就在 prompt 里教她什么时候联网（ADR-0024）。 */
-	private readonly toolCount: number;
+	/** 工具名集合。prompt 里教哪几件事，看手上真有什么（ADR-0026：文件三件和联网是两套说法）。 */
+	private readonly toolNames: Set<string>;
+	/** 只读文件的起点，写进 prompt 用（ADR-0026 补丁：她原来不知道家目录长什么样）。 */
+	private readonly lookRoots: readonly string[];
 	private restoredCount = 0;
 	private styleName: string | null;
 	private readonly episodeTags: readonly string[];
@@ -353,7 +357,9 @@ export class IrisSession {
 		this.bond = options.relationship ?? defaultRelationship(this.clock());
 
 		// buildPrompt() 在 new Agent(...) 的参数里就会被调用，所以这些字段必须先定好。
-		this.toolCount = options.tools?.length ?? 0;
+		// 构造发生在 buildPrompt() 之前：prompt 里写「你能上网 / 你能看文件」要使真手上有的工具。
+		this.toolNames = new Set((options.tools ?? []).map((tool) => tool.name));
+		this.lookRoots = options.lookRoots ?? [];
 		// 先把会话行定下来，再拿它接历史：重启复用的是同一条会话，不是又一条新的。
 		this.conversationId = this.startConversation();
 		const model = magpieModel(options);
@@ -455,7 +461,8 @@ export class IrisSession {
 		this.hook = hooks.onEvent ?? null;
 		// 她要出去查，就把第一条请求的工具强制出来（ADR-0025）。只有一条：查出结果后照常说话。
 		this.toolCallsThisTurn = 0;
-		const lookup = this.toolCount > 0 && looksLikeLookup(input);
+		// 只有联网工具时强制一次工具调用；只给了文件工具时不逼她——那会变成被迫 ls 一遍。
+		const lookup = this.toolNames.has("web_search") && looksLikeLookup(input);
 		this.forcedToolChoices = lookup ? 1 : 0;
 		// 强制出来的工具调用由模型决定搜什么。历史里挂着一句没答完的话时，它会照着旧题目搜，
 		// 所以这里把「这一句是新问题」说清楚——只影响本轮发给模型的输入，归档的仍是原话。
@@ -658,6 +665,11 @@ export class IrisSession {
 		return restored;
 	}
 
+	/** 手上有只读文件三件里的任何一件（ADR-0026）。 */
+	private hasFileTools(): boolean {
+		return this.toolNames.has("ls") || this.toolNames.has("read") || this.toolNames.has("grep");
+	}
+
 	private buildPrompt(): string {
 		const now = this.clock();
 		const remembered = this.remembered(now);
@@ -674,7 +686,9 @@ export class IrisSession {
 			...(remembered.length === 0 ? {} : { memories: remembered }),
 			...(selfFacts.length === 0 ? {} : { selfFacts }),
 			...(style === undefined ? {} : { style }),
-			...(this.toolCount === 0 ? {} : { canSearch: true }),
+			...(this.toolNames.has("web_search") ? { canSearch: true } : {}),
+			...(this.hasFileTools() ? { canLook: true } : {}),
+			...(this.hasFileTools() && this.lookRoots.length > 0 ? { lookRoots: this.lookRoots } : {}),
 			now,
 		});
 	}

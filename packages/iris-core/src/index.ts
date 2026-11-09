@@ -5,6 +5,7 @@ export * from "./attention.ts";
 export * from "./consent.ts";
 export * from "./context.ts";
 export * from "./distill.ts";
+export * from "./files.ts";
 export * from "./initiative.ts";
 export * from "./memory.ts";
 export * from "./model.ts";

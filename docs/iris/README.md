@@ -12,9 +12,9 @@ IRIS（伊里斯）是建立在 pi 之上的**娱乐型 / 陪伴型智能体**�
 | [04-consent.md](04-consent.md) | 授权、披露与红线 |
 | [05-memory.md](05-memory.md) | 记忆分层与检索策略 |
 
-> 记忆生命周期的**实现口径**看 [03-decisions.md](03-decisions.md) 的 ADR-0014（原文永久归档 + 三档 + 时间轴）、ADR-0015（先不建向量库，FTS5 单字+二元组 + 实体加权）、ADR-0016（不设人工确认，写入即生效）；**语料风格**看 ADR-0017；**联网**看 ADR-0024，**「她说搜过了就得真搜」**看 ADR-0025。
+> 记忆生命周期的**实现口径**看 [03-decisions.md](03-decisions.md) 的 ADR-0014（原文永久归档 + 三档 + 时间轴）、ADR-0015（先不建向量库，FTS5 单字+二元组 + 实体加权）、ADR-0016（不设人工确认，写入即生效）；**语料风格**看 ADR-0017；**联网**看 ADR-0024，**「她说搜过了就得真搜」**看 ADR-0025，**只读文件三件**看 ADR-0026。
 
-代码起点：`packages/iris-core`（已可运行，119 个测试）。模块：`types`（词汇表）/ `persona`（四层人格→prompt）/ `memory`（内存版 Episode 表）/ `archive`（SQLite 原文归档 + 三档生命周期 + 无向量检索）/ `distill`（模型分档 + 提炼成短事实）/ `style`（语料导入 → 说话方式档案）/ `attention`（三车道）/ `consent`（授权闸门）/ `initiative`（主动开口）/ `model`（Magpie，主对话 + 视觉两个 endpoint 描述）/ `vision`（看图 → 转述）/ `context`（上下文满了压成记忆）/ `web`（联网：搜索与抓页）/ `session`（pi `Agent` 会话层）。
+代码起点：`packages/iris-core`（已可运行，135 个测试）。模块：`types`（词汇表）/ `persona`（四层人格→prompt）/ `memory`（内存版 Episode 表）/ `archive`（SQLite 原文归档 + 三档生命周期 + 无向量检索）/ `distill`（模型分档 + 提炼成短事实）/ `style`（语料导入 → 说话方式档案）/ `attention`（三车道）/ `consent`（授权闸门）/ `initiative`（主动开口）/ `model`（Magpie，主对话 + 视觉两个 endpoint 描述）/ `vision`（看图 → 转述）/ `context`（上下文满了压成记忆）/ `web`（联网：搜索与抓页）/ `files`（只读文件三件 + 授权闸门）/ `session`（pi `Agent` 会话层）。
 
 ## 跑起来
 
@@ -31,7 +31,7 @@ npm run build
 
 ```bash
 cd packages/iris-core
-node --test test/*.test.ts                    # 119/119
+node --test test/*.test.ts                    # 135/135
 node examples/demo-day.ts                     # 离线：一天的时间线
 node examples/archive-day.ts                  # 离线：三档记忆 + 自动升级 + 无向量检索 + 过期
 node examples/live-turn.ts "今天下班有点累"      # 真模型：走本机 Magpie
@@ -42,7 +42,7 @@ node examples/llm-memory.ts                    # 真模型：规则版 vs 模型
 node examples/compact-day.ts                   # 真模型：上下文撑满 → 压成记忆 → 接着聊
 node examples/corpus-import.ts examples/corpus --speaker 小鹿 --summarize --reply "今天好累啊"
 npm run talk                                   # 真模型：交互式对话，走 ~/.iris/iris.db
-npm run talk -- "在吗"                         # 单发一句就退出（默认联网，--offline 关掉）
+npm run talk -- "在吗"                         # 单发一句就退出（默认联网 + 只读文件，--offline / --no-files 关掉）
 npm run web -- "今天有什么 AI 新闻"            # 不调模型，直接看搜索桥返回什么
 npm run chat                                   # 脚本化六轮，方便对比
 node examples/voice-bench.ts before            # 人味回归基线：12 条输入 → 中位字数/问号/AI 词
@@ -71,5 +71,7 @@ npm run look -- 截图.png --note-only           # 只看转述，不让她说�
 联网（ADR-0024）：pi 上游没有 websearch，所以借 `@liustack/modsearch` 当搜索桥——`web.ts` 起一次 `node dist/main.js`、把 JSON 摊平、压成短文本，导出 `web_search` / `web_fetch` 两个 pi 工具（工具名对齐 dsh，参数用纯 JSON Schema）。默认走 Firecrawl 免注册通道（每月 1 000 credits、无需 key、不用代理），失败自动换引擎；**失败不抛**，翻成 `isError` 结果让模型自己说查不到。prompt 里配了「## 你能上网」四条：先查再说、用自己话说别念结果别报网址、查不到就说查不到、一件事查一次。REPL 默认带工具（`--offline` 关），`npm run web -- "查询"` 是不打模型的体检口。实测单次搜索 1.1–1.9 s；问「今天有什么 AI 新闻」她自己搜了两次、15.8 s 后回「黄仁勋那边的事，NVIDIA 董事会立案查他和疑似外国情报人员的关系了。你信吗，反正我不太信」——内容是当天真事。注意 `source: "x"` 走 grok 退化路径要 11.6 s，描述里已注明一般不传。
 
 真的会去查（ADR-0025）：「让她搜」那句话本身没有查询词，长历史下她只会嘴上答「行，我来搜一个」——库里全是她接工具之前说过的假「搜过了」，接回 transcript（ADR-0021/0022）就成了「我已经查过」的证据。两条腿解决：① `looksLikeLookup()` 认出「搜/查/最新/天气/股价…」这类口吻时，那一轮第一次请求带 `tool_choice: "required"`（走 `samplingParams`，因为 pi 的 `ToolChoice` 只有 auto/none；**必须同时带 `reasoning_effort: "none"`，否则网关 400「Thinking mode does not support this tool_choice」**），工具走完的第二轮不再强制；② 同一轮在发给模型的输入末尾加一句「（这一句是新问题，要查就用这一句问的事去查，今天是…）」——只进请求不进库，历史里的同类尾巴由 `transformContext` 逐条摘掉。实测 200 条历史下：「你试试随便搜索」→ 1 次 `web_search {query:"今日热点新闻"}` 11.7 s；「印度最近出什么事了」「Sakana AI 是什么公司」不带关键词也各查 1 次，「你最近看了什么」0 次。代价是带搜索一轮 5–12 s，查询词里的年份仍会被它编。
+
+只读文件（ADR-0026）：pi 的原生工具在 coding-agent 里（ADR-0012 已裁掉），给她的只有 **ls / read / grep** 三件，`bash` / `write` / `edit` 明确不给——能改机器的能力不可逆，与「未授权不动手」冲突。`files.ts` 的 `FileGuard` 负责让与不让：根目录默认「家目录 + 当前工作目录」，deny 名单挡 .ssh / .env / .pem / .kdbx 一类，**授权单位是根目录下的第一层文件夹**，第一次碰要问人、同意后本次进程内放行，没人能问就一律拒（fail-closed）；三个工具失败只返回 `isError` 结果、不抛。prompt 里按手上真有的工具给段（`canSearch` 只认 `web_search`，`canLook` 只认文件三件），ADR-0025 的强制调工具也收窄成只在有 `web_search` 时触发——否则「帮我搜一下」会逼她去 `ls`。REPL 里她第一次碰某个文件夹会停下来问「（她想看 … 允许吗？y/N）」，也能用 `/allow <路径>` 事先放行；`--no-files` 关掉整套。实测（便签三行）：`ls → read →` 念出原文并点评一句，四轮工具首字 8.5 s；追问细节时不重复读文件，1.2 s 直接答。
 
 模型网关：`model.ts` 只描述 endpoint（本机 Magpie `http://127.0.0.1:3425/v1`，OpenAI 兼容、免 key），默认 `deepseek/deepseek-flash` + `reasoning_effort: none`，首字 0.9–1.8 s；看图用 `workbuddy-ai/hy4free`（`MAGPIE_VISION_MODEL` 可换）。会话循环由 `session.ts` 交给 pi-agent-core 的 `Agent`，不再自写 loop。理由见 ADR-0009 / ADR-0010 / ADR-0011。

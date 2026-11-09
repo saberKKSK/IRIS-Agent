@@ -8,13 +8,15 @@
  * 命令：/prompt 看 system prompt ／ /memory 看开场注入的记忆
  *      /recall 关键词 查归档 ／ /stats 看库 ／ /exit 收尾（归档 + 提炼记忆）
  *      /img 图片路径 [| 附带一句话] 发张图给她看（视觉模型转述，她照自己的脾气接）
+ *      /allow 路径 事先同意她看这个文件夹（不然她第一次碰会先问你）
  */
 
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { defaultArchivePath, SqliteArchive } from "../src/archive.ts";
+import { FileGuard, fileTools } from "../src/files.ts";
 import type { IrisSessionEvent, IrisTurn } from "../src/session.ts";
 import { createSession, imageFrame } from "../src/session.ts";
 import type { Persona } from "../src/types.ts";
@@ -24,6 +26,7 @@ import { webTools } from "../src/web.ts";
 const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const has = (name: string): boolean => args.includes(name);
+const dim = (text: string): string => (process.stdout.isTTY === true ? `\u001b[2m${text}\u001b[0m` : text);
 
 const doc = readFileSync(join(here, "..", "personas", "senjougahara.md"), "utf8");
 
@@ -38,6 +41,44 @@ const persona: Persona = {
 	quirks: [],
 	boundaries: ["不隐瞒自己是 AI"],
 };
+
+/** 排查用：把工具调用与授权决定记到 .artifacts/talk-trace.log（gitignore）。 */
+function trace(line: string): void {
+	try {
+		appendFileSync(
+			process.env.IRIS_TALK_TRACE ?? join(here, "..", "..", "..", ".artifacts", "talk-trace.log"),
+			new Date().toISOString() + " " + line + "\n",
+			"utf8",
+		);
+	} catch {
+		// 记不下来不影响对话
+	}
+}
+
+// 只读文件三件（ADR-0026）：只在她问、且用户同意的文件夹里看；没人能答应就当看不到。
+const guard = new FileGuard({
+	approve: async (request) => {
+		if (!interactive) {
+			trace("no tty, deny " + request.grant);
+			return false;
+		}
+		const verb = request.action === "list" ? "列个目录" : request.action === "search" ? "搜里面的字" : "读里面的文件";
+		trace("approve? " + request.action + " " + request.grant + " (interactive=" + String(interactive) + ")");
+		process.stdout.write(dim(`\n（她想看 ${request.grant} · ${verb}，允许吗？y/N）`));
+		// 生成期间 rl 是 pause 的，不临时打开就问不出来。
+		rl.resume();
+		try {
+			const line = await nextLine();
+			const answer = (line ?? "").trim().toLowerCase();
+			const yes = /^(y|yes|好|行|同意|允许|可以|嗯|对)/u.test(answer);
+			trace("answer=" + JSON.stringify(line ?? null) + " => " + String(yes));
+			if (!yes) process.stdout.write(dim("（没同意，她就当看不到）\n"));
+			return yes;
+		} finally {
+			if (interactive) rl.pause();
+		}
+	},
+});
 
 const dbPath = defaultArchivePath();
 const archive = new SqliteArchive({ path: dbPath });
@@ -55,17 +96,31 @@ const session = createSession({
 	stageDirections: has("--stage"),
 	...(has("--prose") ? { punctuation: "prose" as const } : {}),
 	// 联网（ADR-0024）：真需要查的时候她会自己去查，查不到不会硬编。
-	...(has("--offline") ? {} : { tools: webTools() }),
+	// 文件（ADR-0026）：只读三件 ls / read / grep，第一次碰某个文件夹先问人。
+	...(() => {
+		const web = has("--offline") ? [] : webTools();
+		const files = has("--no-files") ? [] : fileTools({ guard });
+		const tools = [...web, ...files];
+		return {
+			...(tools.length === 0 ? {} : { tools }),
+			// 把真路径写进 prompt：她原来只知道「桌面」四个字，不知道那是家目录下的 Desktop
+			...(files.length === 0 ? {} : { lookRoots: guard.roots }),
+		};
+	})(),
 });
 
-const dim = (text: string): string => (process.stdout.isTTY === true ? `\u001b[2m${text}\u001b[0m` : text);
-
+trace("--- session start pid=" + String(process.pid) + " ---");
 process.stdout.write(`\n${persona.name}　（库：${dbPath}）\n`);
 if (session.restoredMessages > 0) {
 	const id = (session.conversation ?? "").slice(0, 14);
 	process.stdout.write(dim(`（同一个会话 ${id} · 接回 ${session.restoredMessages} 条原文）\n`));
 }
-process.stdout.write(`命令：/prompt /memory /recall 关键词 /stats /img 图片路径 /exit\n\n`);
+if (has("--no-files") === false) {
+	process.stdout.write(
+		dim(`（她手边能看：${guard.roots.join(" / ")}；第一次碰某个文件夹会先问你，/allow <路径> 可以事先放行）\n`),
+	);
+}
+process.stdout.write(`命令：/prompt /memory /recall 关键词 /stats /img 图片路径 /allow 路径 /exit\n\n`);
 
 // 不用 rl.question()：管道输入下第二个 question() 不会 resolve（Node 24 实测）。
 // 改成「行事件进队列 + 等待者唤醒」，交互与非交互同一条路。
@@ -100,6 +155,20 @@ function nextLine(): Promise<string | null> {
 	});
 }
 
+const isFileTool = (name: string): boolean => name === "ls" || name === "read" || name === "grep";
+
+/** 工具在做什么，用一句话说清（联网和看文件两套说法）。 */
+function toolLabel(name: string, raw: unknown): string {
+	const args = (raw ?? {}) as { query?: unknown; url?: unknown; path?: unknown; pattern?: unknown };
+	const text = (value: unknown): string => (typeof value === "string" ? value : "");
+	if (name === "web_search") return `联网：${text(args.query)}`;
+	if (name === "web_fetch") return `看网页：${text(args.url)}`;
+	const path = text(args.path);
+	if (name === "grep") return `搜文件：${text(args.pattern)}${path === "" ? "" : ` @ ${path}`}`;
+	if (name === "ls") return `列目录：${path}`;
+	return `读文件：${path}`;
+}
+
 /** 跑一轮并把字流出来；两种入口（文字、图片）共用这一段。 */
 async function streamTurn(
 	run: (hooks: { onEvent(event: IrisSessionEvent): void }) => Promise<IrisTurn>,
@@ -107,13 +176,15 @@ async function streamTurn(
 	let started = false;
 	const onEvent = (event: IrisSessionEvent): void => {
 		if (event.type === "tool_start") {
-			const args = event.args as { query?: unknown; url?: unknown } | null;
-			const what = typeof args?.query === "string" ? args.query : typeof args?.url === "string" ? args.url : "";
-			process.stdout.write(dim(`\n · 联网：${what}`));
+			trace("tool " + event.toolName + " " + JSON.stringify(event.args));
+			process.stdout.write(dim(`\n · ${toolLabel(event.toolName, event.args)}`));
 			return;
 		}
 		if (event.type === "tool_end") {
-			process.stdout.write(dim(event.isError ? "（没查成）" : "（查回来了）"));
+			const file = isFileTool(event.toolName);
+			const text = event.isError ? (file ? "（没看成）" : "（没查成）") : file ? "（看完了）" : "（查回来了）";
+			trace("tool-end " + event.toolName + " isError=" + String(event.isError));
+			process.stdout.write(dim(text));
 			return;
 		}
 		if (event.type !== "delta") return;
@@ -200,6 +271,19 @@ async function repl(): Promise<void> {
 				continue;
 			}
 			await sayAbout(rawPath, hint);
+			continue;
+		}
+		if (input.startsWith("/allow ")) {
+			const target = input
+				.slice(7)
+				.trim()
+				.replace(/^["']|["']$/g, "");
+			if (target === "") {
+				process.stdout.write("\n用法：/allow <文件夹路径>\n\n");
+				continue;
+			}
+			guard.allow(target);
+			process.stdout.write(`\n（好，${target} 她可以看了）\n\n`);
 			continue;
 		}
 		if (input.startsWith("/recall ")) {
