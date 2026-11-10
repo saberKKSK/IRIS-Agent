@@ -253,6 +253,11 @@ func main() {
 			win.SetInputRegion(region)
 		}
 		win.OnClose(func(e *mygo.CloseEvent) { stop() })
+		// 最小化再恢复时，WebView2 那层不会自己回到合成树上：窗口回来是空的，
+		// 连字幕条和输入框一起不见（native UI 那层是透明的，所以整窗像什么都没有）。
+		// 恢复、重新显示时补一次重画。
+		win.OnRestore(func() { win.Invalidate() })
+		win.OnShow(func() { win.Invalidate() })
 	})
 
 	if err := mygo.App.Run(); err != nil {
