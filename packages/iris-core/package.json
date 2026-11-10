@@ -13,7 +13,7 @@
 		"@liustack/modsearch": "5.10.11"
 	},
 	"scripts": {
-		"test": "node --test test/perception.test.ts test/screen.test.ts test/shell.test.ts test/effort.test.ts test/archive.test.ts test/douyin.test.ts test/files.test.ts test/write.test.ts test/lines.test.ts test/style.test.ts test/distill.test.ts test/vision.test.ts test/context.test.ts test/web.test.ts test/persona.test.ts test/memory.test.ts test/session.test.ts",
+		"test": "node --test test/perception.test.ts test/screen.test.ts test/shell.test.ts test/effort.test.ts test/expression.test.ts test/archive.test.ts test/douyin.test.ts test/files.test.ts test/write.test.ts test/lines.test.ts test/style.test.ts test/distill.test.ts test/vision.test.ts test/context.test.ts test/web.test.ts test/persona.test.ts test/memory.test.ts test/session.test.ts",
 		"live": "node examples/live-turn.ts",
 		"demo:archive": "node examples/archive-day.ts",
 		"remember": "node examples/remember.ts",

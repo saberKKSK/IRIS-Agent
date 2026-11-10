@@ -58,6 +58,9 @@ function internalOf(model: Live2DModel): InternalLike {
 	return internal;
 }
 
+/** 一张脸摆多久自己收回（毫秒）。 */
+const EXPRESSION_HOLD_MS = 14_000;
+
 export interface Box {
 	x: number;
 	y: number;
@@ -82,6 +85,8 @@ export class Stage {
 	private exprValues = new Map<string, number>();
 	private exprTargets = new Map<string, number>();
 	private exprCache = new Map<string, Map<string, number>>();
+	/** 这一张脸摆到什么时候（毫秒时间戳）；到点自己收回默认脸。 */
+	private exprUntil = 0;
 	private status: (text: string) => void = () => {};
 	private base = "/live2d";
 
@@ -258,8 +263,11 @@ export class Stage {
 	 * 连开几个之后 key1..key13 会全部留在 1（作者用这些 key 当部件开关），眼睛被一层层
 	 * 遮罩盖住，实测变成两个灰洞、调 body_default 也回不来。这里自己读 exp3.json、
 	 * 互斥地写这些开关参数，没被这张表情用到的 key 一律收回 0。
+	 *
+	 * 脸会自己收回：`holdMs` 之后淡回 `body_default`——不然她要是一直脸红，十二秒后
+	 * 还红着，那就不是情绪了，是卡住了。传 0 表示不设期限（收回时用）。
 	 */
-	async setExpression(id: string): Promise<void> {
+	async setExpression(id: string, holdMs = EXPRESSION_HOLD_MS): Promise<void> {
 		const targets = await this.loadExpression(id);
 		if (targets === null) return;
 		const names = new Set<string>([...this.exprValues.keys(), ...this.exprTargets.keys(), ...targets.keys()]);
@@ -269,6 +277,7 @@ export class Stage {
 			if (!this.exprValues.has(name)) this.exprValues.set(name, 0);
 		}
 		this.exprTargets = next;
+		this.exprUntil = holdMs > 0 ? performance.now() + holdMs : 0;
 	}
 
 	/** 读一张表情的 exp3.json，缓存下来；模型里没这张就返回 null。 */
@@ -415,6 +424,10 @@ export class Stage {
 		this.put("ParamMouthOpenY", Math.max(0, Math.min(0.85, this.mouth)));
 
 		// 表情：这些开关参数（key*/Clothes*/Movement*）没人跟我们抢，淡过去就行
+		if (this.exprUntil !== 0 && performance.now() > this.exprUntil) {
+			this.exprUntil = 0;
+			void this.setExpression("body_default", 0);
+		}
 		if (this.exprTargets.size > 0) {
 			const k = Math.min(1, dt * 6);
 			for (const [name, goal] of this.exprTargets) {

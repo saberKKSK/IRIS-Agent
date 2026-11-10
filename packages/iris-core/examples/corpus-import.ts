@@ -83,7 +83,7 @@ if (speakers.length > 0) {
 const profile = await importStyle(name, files, {
 	speaker: wanted,
 	summarize: has("--summarize"),
-	onError: (error) => console.error("模型归纳失败，档案照旧：" + String(error)),
+	onError: (error) => console.error(`模型归纳失败，档案照旧：${String(error)}`),
 });
 
 const archive = new SqliteArchive({ path: defaultArchivePath() });
@@ -125,7 +125,7 @@ if (profile.particles.length > 0) {
 	);
 }
 if (profile.catchphrases.length > 0) {
-	console.log("口癖：" + profile.catchphrases.map((row) => row.token + "×" + row.count).join("、"));
+	console.log(`口癖：${profile.catchphrases.map((row) => `${row.token}×${row.count}`).join("、")}`);
 }
 console.log("原话样本：" + profile.samples.map((sample) => "「" + sample + "」").join(" "));
 if (profile.summary !== undefined) console.log("模型归纳：" + profile.summary);

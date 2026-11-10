@@ -1,5 +1,6 @@
 /** Builds the system prompt from separate persona, relationship, mood and memory sources. */
 
+import { IRIS_EXPRESSIONS } from "./expression.ts";
 import type { Episode, Persona, PersonaState, Relationship } from "./types.ts";
 
 export interface PromptContext {
@@ -19,6 +20,8 @@ export interface PromptContext {
 	stageDirections?: boolean;
 	/** 标点风格。`chat`（默认）句尾不留句号；`prose` 按书面语来。 */
 	punctuation?: "chat" | "prose";
+	/** 壳子能画脸（ADR-0041）：开了就教她用 `<脸红>` 这类标记，默认开。 */
+	expressions?: boolean;
 	/** 手上有联网工具（web_search / web_fetch）。开了就教她什么时候查、查完怎么说。 */
 	canSearch?: boolean;
 	/** 手上有只读文件工具（ls / read / grep）。开了就讲清楚：只有他同意的文件夹看得见，看不到就说看不到（ADR-0026）。 */
@@ -314,8 +317,19 @@ export function buildSystemPrompt(context: PromptContext): string {
 	}
 	if (context.stageDirections !== true) {
 		lines.push(
-			"- 你只有语言。只输出你要说的那句话本身：不要写「（翻过一页书）」这类动作、神情、旁白，也不要用星号包裹动作。情绪靠措辞和节奏带出来。",
+			context.expressions === false
+				? "- 你只有语言。只输出你要说的那句话本身：不要写「（翻过一页书）」这类动作、神情、旁白，也不要用星号包裹动作。情绪靠措辞和节奏带出来。"
+				: "- 你只有语言和一张脸。不要写「（翻过一页书）」这类动作、神情、旁白，也不要用星号包裹动作：脸上的东西只用下面那个标记，情绪主要还是靠措辞和节奏带出来。",
 		);
+	}
+	if (context.expressions !== false) {
+		lines.push("## 你的脸");
+		lines.push("- 你有脸，它会跟着你说的话动。想让它动，就在回复最前面写一个标记，比如 <脸红>。");
+		lines.push(
+			"- 它跟着语气走：话里真有那个情绪才写，一条回复最多一个，多数回复不写。没有标记就是没动脸，这很正常。",
+		);
+		lines.push("- 能用的：" + IRIS_EXPRESSIONS.map((item) => "<" + item.tag + "> " + item.when).join("；"));
+		lines.push("- 标记不是台词。别解释它，别把它写进句子中间，也别拿它替代措辞。");
 	}
 
 	return lines.join("\n");

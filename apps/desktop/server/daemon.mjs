@@ -77,6 +77,9 @@ function mapper(event) {
 		case "delta":
 			broadcast({ type: "delta", text: event.text });
 			return;
+		case "expression":
+			broadcast({ type: "expression", id: event.id });
+			return;
 		case "tool_start":
 			broadcast({ type: "tool", toolName: event.toolName, phase: "start" });
 			return;
@@ -87,6 +90,7 @@ function mapper(event) {
 			broadcast({
 				type: "turn",
 				text: event.turn.text,
+				expression: event.turn.expression ?? null,
 				firstTokenMs: event.turn.firstTokenMs,
 				latencyMs: event.turn.latencyMs,
 				effort: String(event.turn.effort ?? "none"),

@@ -5,6 +5,7 @@ export * from "./context.ts";
 export * from "./distill.ts";
 export * from "./douyin.ts";
 export * from "./effort.ts";
+export * from "./expression.ts";
 export * from "./files.ts";
 export * from "./lines.ts";
 export * from "./memory.ts";

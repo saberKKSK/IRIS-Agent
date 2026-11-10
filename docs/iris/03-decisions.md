@@ -1021,3 +1021,57 @@ fork 的 `model.expression(id)` 能返回 true、`motionManager.expressionManage
 - 已验证（真机）：Esc 最小化（点进输入框拿焦点后发 VK_ESCAPE → `IsIconic=True`，`SW_RESTORE` 回来几何不变）、最小化→恢复后**亚克力不会回来**（恢复后采样仍是 `(21,21,23)`）、点击穿透（壳下面顶一块计数窗：透明空隙点一下计数 0→1，人物身上点一下仍是 1）、注视跟随（见修法四）。
 - 排查留下的一次性脚本在 `C:\IRIS Agent\.artifacts\`（`iso.py` / `layered_probe3.py` / `enumwin.ps1` / 各种 crop 图），没进仓库。
 
+## ADR-0041 · 表情她自己选：正文里的 `<脸红>` 是标记，不是台词
+
+- 状态：已实施（真机跑通：`EXPRESSION swirl_eyes` 事件、`key3` 淡入、14 s 后自动收回；`npm test` 243/243、`tsc --noEmit` exit 0）
+- 日期：2026-11-10
+
+### 背景
+
+用户 m09060：「根据伊里斯的话语她自行操控表情，类似她的语气、情绪表现在脸上」。壳这一侧的表情通道已经能用（ADR-0040 修法九：`stage.setExpression(id)` 自己互斥地写 `key1..key13`），缺的是「她怎么决定换哪张脸」。
+
+两条路：① 再起一个模型调用，让她把回答连同情绪标签一起吐 JSON；② **就在正文里写标记**，内核在流式放行时把标记摘掉。选 ② 因为「她说什么」和「她脸上是什么」是同一句话的两个面——拆成两次调用要额外一次 3~9 s 的推理，而且第二次永远不知道她第一句到底怎么说的。
+
+### 标记协议
+
+八张脸，中文标记，写在回复**最前面**（`packages/iris-core/src/expression.ts` 的 `IRIS_EXPRESSIONS`）：
+
+| 标记 | 表情 id | 什么时候用 |
+|---|---|---|
+| `<脸红>` | `blush` | 被戳中、被夸、不好意思 |
+| `<爱心眼>` | `heart_eyes` | 真的很高兴、喜欢 |
+| `<圈圈眼>` | `swirl_eyes` | 被绕晕、听不懂、脑子打结 |
+| `<冷汗>` | `cold_sweat` | 尴尬、无语 |
+| `<黑脸>` | `dark_face` | 生气、被冒犯 |
+| `<眼泪>` | `tears` | 委屈、难过 |
+| `<得意>` | `smug_eyes` | 看穿他在装、觉得自己赢了 |
+| `<崩溃>` | `distressed_eyes` | 受不了了、彻底垮 |
+
+prompt 里（`persona.ts` 的「## 你的脸」）明说四件事：写在最前面、跟随语气、一条回复最多一个、**多数时候不写**，并强调「标记不是台词，会被摘掉」。不开表情时整段不出现，`stripStageDirections` 那句也改回原话。
+
+### 两个必须做对的地方
+
+**一、流式摘标记，不能等整段。** `delta` 是逐片吐的，标记可能被切成 `<脸` + `红>`。`class ExpressionStream` 只吞**认识的**标记：`<` 后面拼到最长 8 个字符还在词表里就继续压着等（`MAX_TAG + 2` 之后当普通 `<` 吐回去）；不认识的一律原样输出——这样她真写了 `<div>` 也不会被吃掉。`flush()` 交回压住的尾巴，`splitExpression()` 给非流式场景做等价物。
+
+**二、事件要在正文之前到。** `session.ts` 的 `forward()` 里先 `expressionStream.push()`、再 `announceExpression()`、最后才 `emit({ type: "delta" })`；收尾再 `splitExpression()` 兜一次（有些标记可能写在句尾）。`announceExpression()` 对 null 和「跟上一张一样」都不发，避免一个字一张脸地抖。
+
+链路是：内核 `expression` 事件 → `daemon.mjs` 的 `mapper()` 广播 `{type:"expression", id}` → `bridge.ts` 的 `BridgeEvent` → `main.ts` 的 `handle()` 调 `stage.setExpression(id)` → `stage.ts` 按 `dt*6` 淡过去写 `key` 参数。`turn` 事件也带上 `expression`，方便日志对账。
+
+### 脸不能一直红着
+
+`stage.ts` 加 `EXPRESSION_HOLD_MS = 14_000` 和 `exprUntil`：`setExpression(id, holdMs)` 设到期时间，`drive()` 每帧检查，过期就 `setExpression("body_default", 0)` 收回。**她自己不收回，壳替她收**——否则一句「你今天真好看」红十分钟。
+
+### 实测
+
+- 日志（`.artifacts/saywatch.mjs`，SSE 直读）：发「你知道吗，你今天这身真好看，我盯着看了半天」→ **3810 ms 收到 `EXPRESSION blush`，3827 ms 才有第一个 delta**，`turn.expression = "blush"`，字幕里没有 `<脸红>`。
+- 形状对账（CDP 读 `window.__stage` 的私有字段）：另一轮她选了 `<圈圈眼>`，2466 ms 时 `exprTargets` 从 `key7:0` 变成 `key3:1, key4:0, key5:0, key6:0`（正是 `swirl_eyes` 的 exp3 定义），`exprValues.key3` 从 0.68 → 1.0 平滑淡入，`exprUntil` = 现在 + 13.8 s。**这条证明标记在 iris-core 被摘、经 daemon 到 stage、最后真的淡进了参数。**
+- 自动收回：`setExpression('swirl_eyes', 3000)` 之后 4.5 s 读，`exprValues` 里超过 0.2 的项为空、`exprUntil` 过期——脸回去了。
+- 画面对照（同一姿势强制三张脸再抓屏，`.artifacts/expr-{plain,blush,swirl}.png`）：脸颊区（`196,138–320,176`）的**平均红度** plain 6.3 / blush **20.1** / swirl 12.4，「强红像素」占比 6.8% / **38.1%** / 4.4%；眼部区亮度 plain 147.4 → swirl **188.3**（空心白眼圈）。blush 与 swirl 都是肉眼一眼可见、数字也对得上的。
+
+### 代价与边界
+
+- **她自己选，就会选错或不用**。词表八张是硬约束，prompt 里写「多数时候不写」，实测两条回复一条写了 blush、一条写了 swirl_eyes——比预期克制，但也意味着「该红的时候没红」会经常发生。要更准只能上「按 policy 决定」那条路（见人格蒸馏框架），不是加提示词能解决的。
+- **标记只在正文开头那段有效**：写在句子中间也会被摘掉、照样换脸，但延迟会变成「说到一半才变」。
+- 14 s 固定收回是拍的，没有按句长/情绪强度调整。同一张脸连续两轮只发一次事件，第三轮再出现会重新触发。
+- 已知未做：表情和 `talking` 口型、眨眼之间的互相干扰没专门测；`<div>` 之类未知标签虽然原样透传，但如果她真写 `<脸红 >`（带空格）会被当未知标签——`MAX_TAG` 与 trim 只处理了前后空白。
+

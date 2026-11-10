@@ -33,6 +33,7 @@ import {
 	type EffortOptions,
 	type IrisEffort,
 } from "./effort.ts";
+import { ExpressionStream, splitExpression } from "./expression.ts";
 import type { InMemoryMemoryStore } from "./memory.ts";
 import {
 	DEFAULT_SESSION_EFFORT,
@@ -74,6 +75,8 @@ export interface IrisUsage {
 /** 一轮结束后的结果，够写日志、够喂 TTS、够算延迟预算。 */
 export interface IrisTurn {
 	text: string;
+	/** 这一轮她想摆的表情 id（ADR-0041），没写就是 null。 */
+	expression: string | null;
 	reasoning: string;
 	model: string;
 	usage: IrisUsage;
@@ -93,6 +96,8 @@ export type IrisSessionEvent =
 	| { type: "turn_start" }
 	| { type: "reasoning"; text: string }
 	| { type: "delta"; text: string }
+	/** 字幕里写着 `<脸红>`：壳子收到就把脸换过去（ADR-0041）。 */
+	| { type: "expression"; id: string }
 	| { type: "tool_start"; toolCallId: string; toolName: string; args: unknown }
 	| { type: "tool_end"; toolCallId: string; toolName: string; isError: boolean; elapsedMs?: number }
 	| { type: "turn_end"; turn: IrisTurn }
@@ -142,6 +147,8 @@ export interface IrisSessionOptions {
 	stageDirections?: boolean;
 	/** 标点风格：`chat`（默认）句尾不留句号，`prose` 保留。 */
 	punctuation?: "chat" | "prose";
+	/** 壳子会画脸（ADR-0041）：开了她才在正文里写 `<脸红>`；默认开，标记不会进字幕和归档。 */
+	expressions?: boolean;
 	/** 网关模型 id，默认 `deepseek/deepseek-flash`。 */
 	model?: string;
 	/** 网关根地址，含 `/v1`。 */
@@ -408,6 +415,7 @@ export class IrisSession {
 	private readonly personaDoc: string | undefined;
 	private readonly stageDirections: boolean | undefined;
 	private readonly punctuation: "chat" | "prose" | undefined;
+	private readonly expressions: boolean | undefined;
 	private readonly memory: InMemoryMemoryStore | null;
 	private readonly archive: SqliteArchive | null;
 	private conversationId: string | null = null;
@@ -439,6 +447,10 @@ export class IrisSession {
 	private hook: ((event: IrisSessionEvent) => void) | null = null;
 	private runStartedAt = 0;
 	private firstTokenMs = 0;
+	/** 这一轮的 `<脸红>` 过滤器：边收边吐，标记不进字幕（ADR-0041）。 */
+	private expressionStream: ExpressionStream | null = null;
+	/** 已经告诉过壳子的那张脸，同一个不重复发。 */
+	private announcedExpression: string | null = null;
 	private turns = 0;
 	/** 这一轮还剩几条请求要强制带工具（0 = 不强制）。 */
 	private forcedToolChoices = 0;
@@ -467,6 +479,7 @@ export class IrisSession {
 		this.personaDoc = options.personaDoc;
 		this.stageDirections = options.stageDirections;
 		this.punctuation = options.punctuation;
+		this.expressions = options.expressions;
 		this.memory = options.memory ?? null;
 		this.archive = options.archive ?? null;
 		this.recentLimit = options.recentLimit ?? DEFAULT_RECENT;
@@ -646,6 +659,8 @@ export class IrisSession {
 		const startedAt = performance.now();
 		this.runStartedAt = startedAt;
 		this.firstTokenMs = 0;
+		this.expressionStream = new ExpressionStream();
+		this.announcedExpression = null;
 		this.hook = hooks.onEvent ?? null;
 		// 她要出去查，就把第一条请求的工具强制出来（ADR-0025）。只有一条：查出结果后照常说话。
 		this.toolCallsThisTurn = 0;
@@ -715,6 +730,11 @@ export class IrisSession {
 		}
 
 		if (this.stageDirections !== true) text = stripStageDirections(text);
+		// 整段再摘一次：模型没走增量（或一次吐完）时，流式过滤器压根没看到这些字。
+		const spoken = splitExpression(text);
+		text = spoken.text;
+		const expression = spoken.expression ?? this.announcedExpression;
+		this.announceExpression(expression);
 		if (this.punctuation !== "prose") {
 			text = chatify(stripTrailingPeriods(text));
 		}
@@ -725,6 +745,7 @@ export class IrisSession {
 		const at = this.clock();
 		const turn: IrisTurn = {
 			text,
+			expression,
 			reasoning,
 			model: message.responseModel ?? message.model,
 			usage,
@@ -954,6 +975,7 @@ export class IrisSession {
 			...(this.personaDoc === undefined ? {} : { portrait: this.personaDoc }),
 			...(this.stageDirections === undefined ? {} : { stageDirections: this.stageDirections }),
 			...(this.punctuation === undefined ? {} : { punctuation: this.punctuation }),
+			...(this.expressions === undefined ? {} : { expressions: this.expressions }),
 			state: this.state,
 			relationship: this.bond,
 			recent: this.memory?.recent(this.recentLimit) ?? [],
@@ -1063,6 +1085,13 @@ export class IrisSession {
 		});
 	}
 
+	/** 她换了一张脸就告诉壳子一声；同一张不重复发。 */
+	private announceExpression(id: string | null): void {
+		if (id === null || id === this.announcedExpression) return;
+		this.announcedExpression = id;
+		this.emit({ type: "expression", id });
+	}
+
 	private emit(event: IrisSessionEvent): void {
 		this.listener?.(event);
 		this.hook?.(event);
@@ -1090,7 +1119,10 @@ export class IrisSession {
 					this.emit({ type: "reasoning", text: inner.delta });
 				} else if (inner.type === "text_delta") {
 					if (this.firstTokenMs === 0) this.firstTokenMs = performance.now() - this.runStartedAt;
-					this.emit({ type: "delta", text: inner.delta });
+					// 标记当场摘掉再播：字幕里不该出现 `<脸红>`，但脸要立刻换（ADR-0041）。
+					const text = this.expressionStream === null ? inner.delta : this.expressionStream.push(inner.delta);
+					this.announceExpression(this.expressionStream?.expression ?? null);
+					if (text !== "") this.emit({ type: "delta", text });
 				}
 				return;
 			}

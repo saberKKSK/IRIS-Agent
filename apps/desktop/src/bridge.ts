@@ -3,7 +3,8 @@
 export type BridgeEvent =
 	| { type: "hello"; model: string; conversation: string | null }
 	| { type: "delta"; text: string }
-	| { type: "turn"; text: string; firstTokenMs: number; latencyMs: number; effort: string }
+	| { type: "expression"; id: string }
+	| { type: "turn"; text: string; expression?: string | null; firstTokenMs: number; latencyMs: number; effort: string }
 	| { type: "tool"; toolName: string; phase: "start" | "end"; isError?: boolean }
 	| { type: "compact"; dropped: number }
 	| { type: "error"; message: string };

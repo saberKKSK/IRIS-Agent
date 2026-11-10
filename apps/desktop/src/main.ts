@@ -50,6 +50,10 @@ const handle = (event: BridgeEvent): void => {
 			}
 			ui.pushDelta(event.text);
 			break;
+		case "expression":
+			// 她在正文最前面写了 `<脸红>`：核心层已经把这个标记摘掉了，这里只管换脸（ADR-0041）。
+			void stage.setExpression(event.id).catch(() => {});
+			break;
 		case "turn": {
 			streaming = false;
 			stage.setTalking(false);
