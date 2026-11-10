@@ -1,12 +1,11 @@
 /** Public surface of the IRIS companion runtime core. */
 
 export * from "./archive.ts";
-export * from "./attention.ts";
-export * from "./consent.ts";
 export * from "./context.ts";
 export * from "./distill.ts";
+export * from "./douyin.ts";
+export * from "./effort.ts";
 export * from "./files.ts";
-export * from "./initiative.ts";
 export * from "./memory.ts";
 export * from "./model.ts";
 export * from "./persona.ts";

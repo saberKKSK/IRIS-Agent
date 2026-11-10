@@ -938,15 +938,3 @@ export function renderMemories(memories: readonly MemoryRecord[], now: number): 
 		})
 		.join("\n");
 }
-
-/** 把记忆当 Episode 喂给旧 MemoryStore（两套可以并存，省一次迁移）。 */
-export function toEpisode(memory: MemoryRecord): Episode {
-	return {
-		id: memory.id,
-		at: memory.createdAt,
-		kind: "conversation",
-		summary: memory.text,
-		tags: memory.tags,
-		importance: memory.importance,
-	};
-}

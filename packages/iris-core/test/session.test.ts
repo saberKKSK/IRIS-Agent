@@ -10,12 +10,16 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, normalizeContext } from "@earendil-works/pi-ai";
 import {
 	createSession,
+	dmNudge,
 	InMemoryMemoryStore,
 	IrisSessionError,
+	looksLikeDm,
 	looksLikeLookup,
+	looksLikePromiseAgreement,
 	lookupNudge,
 	magpieModel,
 	magpieStreamFn,
+	promiseNudge,
 	SqliteArchive,
 	stripNudgeText,
 	webTools,
@@ -376,10 +380,10 @@ test("要不要出去查：只认「去查」的口吻，问自己的事不查",
 	for (const text of no) assert.equal(looksLikeLookup(text), false, text);
 });
 
-test("强制查那句提示：带今天的日期，能摘干净", () => {
-	const now = Date.UTC(2026, 10, 9, 4, 0, 0);
-	const nudge = lookupNudge(now);
-	assert.ok(nudge.includes("2026年11月9日"), "提示里得有今天的日期，否则她会编一个");
+test("强制查那句提示：不带日期、能摘干净", () => {
+	const nudge = lookupNudge();
+	assert.ok(nudge.includes("这一句是新问题"));
+	assert.ok(!nudge.includes("2026年"), "日期改由每轮末尾的时间戳给，提示里不再写死");
 	const input = "帮我查一下今天东京天气";
 	const sent = input + nudge;
 	assert.equal(stripNudgeText(sent), input);
@@ -414,4 +418,195 @@ test("没工具就不加那句提示", async () => {
 	const last = users.at(-1);
 	const text = typeof last?.content === "string" ? last.content : "";
 	assert.ok(!text.includes("这一句是新问题"));
+});
+
+test("每轮请求前现读本机时钟：时间贴在对方那句话后面，历史里不留", async () => {
+	const seen: string[] = [];
+	const at = new Date(2026, 10, 10, 9, 7).getTime();
+	const script = scripted(["知道。"]);
+	const session = createSession({
+		persona: PERSONA,
+		clock: () => at,
+		streamFn: (model, context, options) => {
+			const content = context.messages.at(-1)?.content;
+			seen.push(
+				typeof content === "string"
+					? content
+					: (content ?? []).map((b) => (b.type === "text" ? b.text : "")).join(""),
+			);
+			return script(model, context, options ?? {});
+		},
+	});
+	await session.say("今天几号");
+	assert.ok(seen[0]?.includes("2026年11月10日 星期二 09:07"), "模型看到的必须带这一刻的时间");
+	assert.ok(seen[0]?.includes("本机时钟"));
+
+	const stored = session.messages.filter((message) => message.role === "user").at(-1);
+	const text =
+		typeof stored?.content === "string"
+			? stored.content
+			: (stored?.content ?? []).map((b) => (b.type === "text" ? b.text : "")).join("");
+	assert.equal(text, "今天几号", "transcript 里不该留时间戳");
+});
+
+test("她说「要不我查一下」，对方「嗯」：认得出，且这一轮真去查", async () => {
+	assert.equal(looksLikePromiseAgreement("我没瞎说\n要不我查一下？", "嗯"), true);
+	assert.equal(looksLikePromiseAgreement("我没瞎说\n要不我查一下？", "嗯嗯，查吧"), true);
+	assert.equal(looksLikePromiseAgreement("我没瞎说\n要不我查一下？", "哦"), false);
+	assert.equal(looksLikePromiseAgreement("周四，挨过去还有一天", "嗯"), false, "上一句没答应要查就不逼她");
+	assert.equal(looksLikePromiseAgreement(null, "嗯"), false);
+	assert.ok(promiseNudge().includes("web_search"));
+
+	const seen: string[] = [];
+	const script = scripted(["我没瞎说\n要不我查一下？", "我查了，今天是周二"]);
+	const session = createSession({
+		persona: PERSONA,
+		tools: webTools(),
+		streamFn: (model, context, options) => {
+			const last = context.messages.at(-1);
+			const content = last?.content;
+			seen.push(
+				typeof content === "string"
+					? content
+					: (content ?? []).map((b) => (b.type === "text" ? b.text : "")).join(""),
+			);
+			return script(model, context, options ?? {});
+		},
+	});
+	await session.say("今天是周几");
+	await session.say("嗯");
+	assert.ok(!seen[0]?.includes("上一条答应的事"), "第一轮没答应过什么，不该带提示");
+	assert.ok(seen.at(-1)?.includes("上一条答应的事"), "第二轮是同意，得逼她真去查");
+	assert.equal(stripNudgeText(seen.at(-1) ?? ""), "嗯", "提示能从历史里摘干净");
+});
+
+test("问私信：认得出、加上「用 douyin_im 真看一遍」的提示、历史里摘得掉", () => {
+	assert.equal(looksLikeDm("看看谁给我发私信了"), true);
+	assert.equal(looksLikeDm("有人给我发消息吗"), true);
+	assert.equal(looksLikeDm("今天天气怎么样"), false);
+	const nudged = "看看谁给我发私信了" + dmNudge();
+	assert.ok(nudged.includes("douyin_im"));
+	assert.equal(stripNudgeText(nudged), "看看谁给我发私信了");
+});
+
+test("问私信：手上有 douyin_im 时，这一轮会带上「真去看一遍」的提示", async () => {
+	const seen: string[] = [];
+	const session = createSession({
+		persona: PERSONA,
+		tools: [
+			{
+				name: "douyin_im",
+				label: "看私信",
+				description: "看私信",
+				parameters: { type: "object", properties: {} },
+				execute: async () => ({ content: [{ type: "text", text: "没有新消息" }], details: {} }),
+			},
+		],
+		streamFn: (model, context, options) => {
+			const last = context.messages.at(-1);
+			const content = last?.content;
+			seen.push(
+				typeof content === "string"
+					? content
+					: (content ?? []).map((block) => (block.type === "text" ? block.text : "")).join(""),
+			);
+			return scripted(["没看到新消息"])(model, context, options ?? {});
+		},
+	});
+	await session.say("看看谁给我发私信了");
+	assert.ok(seen[0]?.includes("douyin_im"), "发给模型的那一句要指名用 douyin_im");
+	assert.ok(seen[0]?.includes("别猜别编"));
+});
+
+test("自动档位：规则说是闲聊就走 none，并且记在 turn 里", async () => {
+	const session = createSession({
+		persona: PERSONA,
+		autoEffort: true,
+		streamFn: scripted(["嗯"]),
+		resumeMessages: 0,
+	});
+	const turn = await session.say("在吗");
+	assert.equal(turn.effort, "none");
+	assert.equal(session.effort?.source, "rule");
+});
+
+test("自动档位：要说理的话升到 low", async () => {
+	const session = createSession({
+		persona: PERSONA,
+		autoEffort: true,
+		streamFn: scripted(["站不住"]),
+		resumeMessages: 0,
+	});
+	const turn = await session.say("他说我 MBTI 是 62 到 78，跟我自己记的 72 到 78 对不对得上");
+	assert.equal(turn.effort, "low");
+	assert.equal(session.effort?.source, "rule");
+});
+
+test("自动档位：规则拿不准就问分类模型，判断进 turn", async () => {
+	let asked = 0;
+	const session = createSession({
+		persona: PERSONA,
+		autoEffort: true,
+		effort: {
+			allowClassifier: true,
+			classifier: async () => {
+				asked += 1;
+				return { effort: "low", relation: "new", confidence: 0.9 };
+			},
+		},
+		streamFn: scripted(["这样啊"]),
+		resumeMessages: 0,
+	});
+	const turn = await session.say("今天下午去了海边，风很大，后来吃了点东西就回来了");
+	assert.equal(asked, 1);
+	assert.equal(turn.effort, "low");
+	assert.equal(session.effort?.source, "classifier");
+});
+
+test("自动档位：要逼工具的那一轮必须落到 none（思考模式下 tool_choice 会 400）", async () => {
+	const session = createSession({
+		persona: PERSONA,
+		autoEffort: true,
+		tools: webTools(),
+		effort: {
+			allowClassifier: true,
+			classifier: async () => ({ effort: "high", relation: "new", confidence: 0.99 }),
+		},
+		streamFn: scripted(["查过了"]),
+		resumeMessages: 0,
+	});
+	const turn = await session.say("帮我搜一下今天有什么 AI 新闻");
+	assert.equal(turn.effort, "none");
+	assert.match(session.effort?.reason ?? "", /逼工具/);
+});
+
+test("自动档位关着：一直是会话默认档 high，也不问模型", async () => {
+	let asked = 0;
+	const session = createSession({
+		persona: PERSONA,
+		effort: {
+			allowClassifier: true,
+			classifier: async () => {
+				asked += 1;
+				return { effort: "high", relation: "new", confidence: 1 };
+			},
+		},
+		streamFn: scripted(["嗯"]),
+		resumeMessages: 0,
+	});
+	const turn = await session.say("他说我 MBTI 是 62 到 78，跟我自己记的 72 到 78 对不对得上");
+	assert.equal(asked, 0);
+	assert.equal(turn.effort, "high");
+	assert.equal(session.effort, null);
+});
+
+test("强制工具那一轮：turn 里记的是 none（那一请求真的关了思考）", async () => {
+	const session = createSession({
+		persona: PERSONA,
+		tools: webTools(),
+		streamFn: scripted(["查过了"]),
+		resumeMessages: 0,
+	});
+	const turn = await session.say("帮我搜一下今天有什么 AI 新闻");
+	assert.equal(turn.effort, "none");
 });

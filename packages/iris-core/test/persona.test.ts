@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildSystemPrompt, describeRelationship, stripStageDirections, stripTrailingPeriods } from "../src/persona.ts";
+import {
+	buildSystemPrompt,
+	dayStamp,
+	describeRelationship,
+	formatClock,
+	formatDate,
+	formatMoment,
+	momentNote,
+	stripStageDirections,
+	stripTrailingPeriods,
+} from "../src/persona.ts";
 import type { Episode, Persona, PersonaState } from "../src/types.ts";
 
 const persona: Persona = {
@@ -21,6 +31,34 @@ const state: PersonaState = {
 	activity: "陪用户打游戏",
 	speaking: false,
 };
+
+describe("今天几号", () => {
+	it("把日期和星期写成人话", () => {
+		const now = new Date(2026, 10, 10, 8, 50).getTime();
+		assert.equal(formatDate(now), "2026年11月10日 星期二");
+		assert.equal(formatClock(now), "2026年11月10日 星期二 08:50");
+		assert.equal(formatMoment(now), "2026年11月10日 星期二 08:50（UTC+8）");
+		assert.equal(dayStamp(now), "2026-11-10");
+	});
+
+	it("时间戳每轮现读，prompt 里只留规则", () => {
+		const now = new Date(2026, 10, 10, 8, 50).getTime();
+		const filled = buildSystemPrompt({
+			persona,
+			state,
+			relationship: { closeness: 0.55, sharedMoments: 12, lastInteractionAt: 4999 },
+			recent: [],
+			now,
+		});
+		assert.doesNotMatch(filled, /现在是：2026/, "写死时间的话，开着过夜就是昨天的日期");
+		assert.match(filled, /每一轮对方的话末尾会附一句/);
+		assert.match(filled, /别自己推日子/);
+
+		const note = momentNote(new Date(2026, 10, 10, 9, 7).getTime());
+		assert.ok(note.includes("2026年11月10日 星期二 09:07"));
+		assert.ok(note.includes("本机时钟"));
+	});
+});
 
 describe("describeRelationship", () => {
 	it("clamps invalid closeness", () => {

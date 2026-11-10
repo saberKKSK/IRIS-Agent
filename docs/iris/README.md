@@ -12,9 +12,9 @@ IRIS（伊里斯）是建立在 pi 之上的**娱乐型 / 陪伴型智能体**�
 | [04-consent.md](04-consent.md) | 授权、披露与红线 |
 | [05-memory.md](05-memory.md) | 记忆分层与检索策略 |
 
-> 记忆生命周期的**实现口径**看 [03-decisions.md](03-decisions.md) 的 ADR-0014（原文永久归档 + 三档 + 时间轴）、ADR-0015（先不建向量库，FTS5 单字+二元组 + 实体加权）、ADR-0016（不设人工确认，写入即生效）；**语料风格**看 ADR-0017；**联网**看 ADR-0024，**「她说搜过了就得真搜」**看 ADR-0025，**只读文件三件**看 ADR-0026。
+> 记忆生命周期的**实现口径**看 [03-decisions.md](03-decisions.md) 的 ADR-0014（原文永久归档 + 三档 + 时间轴）、ADR-0015（先不建向量库，FTS5 单字+二元组 + 实体加权）、ADR-0016（不设人工确认，写入即生效）；**语料风格**看 ADR-0017；**联网**看 ADR-0024，**「她说搜过了就得真搜」**看 ADR-0025，**只读文件三件**看 ADR-0026 / ADR-0027，**点赞与评论不设人工闸门**看 ADR-0028，**私信只回名单上的人**看 ADR-0029 / ADR-0030，**思考档位自动选**看 ADR-0031。
 
-代码起点：`packages/iris-core`（已可运行，135 个测试）。模块：`types`（词汇表）/ `persona`（四层人格→prompt）/ `memory`（内存版 Episode 表）/ `archive`（SQLite 原文归档 + 三档生命周期 + 无向量检索）/ `distill`（模型分档 + 提炼成短事实）/ `style`（语料导入 → 说话方式档案）/ `attention`（三车道）/ `consent`（授权闸门）/ `initiative`（主动开口）/ `model`（Magpie，主对话 + 视觉两个 endpoint 描述）/ `vision`（看图 → 转述）/ `context`（上下文满了压成记忆）/ `web`（联网：搜索与抓页）/ `files`（只读文件三件 + 授权闸门）/ `session`（pi `Agent` 会话层）。
+代码起点：`packages/iris-core`（已可运行，170 个测试）。模块：`types`（词汇表）/ `persona`（四层人格→prompt）/ `memory`（内存版 Episode 表）/ `archive`（SQLite 原文归档 + 三档生命周期 + 无向量检索）/ `distill`（模型分档 + 提炼成短事实）/ `style`（语料导入 → 说话方式档案）/ `model`（Magpie，主对话 + 视觉两个 endpoint 描述）/ `vision`（看图 → 转述）/ `context`（上下文满了压成记忆）/ `web`（联网：搜索与抓页）/ `files`（只读文件三件 + 授权闸门）/ `douyin`（刷抖音：推荐流 / 评论 / 点爱心 / 发一条 / 私信只回名单上的人）/ `browser`（借插件那台无头 Chrome 在页面里发请求）/ `effort`（这一轮该想多深：规则优先，分类模型可选）/ `complete`（一次纯文本补全，几个模块共用）/ `session`（pi `Agent` 会话层）。
 
 ## 跑起来
 
@@ -31,8 +31,7 @@ npm run build
 
 ```bash
 cd packages/iris-core
-node --test test/*.test.ts                    # 135/135
-node examples/demo-day.ts                     # 离线：一天的时间线
+node --test test/*.test.ts                    # 170/170
 node examples/archive-day.ts                  # 离线：三档记忆 + 自动升级 + 无向量检索 + 过期
 node examples/live-turn.ts "今天下班有点累"      # 真模型：走本机 Magpie
 node examples/remember.ts "记住这个：我对花生过敏"  # 真模型：写入 ~/.iris/iris.db
@@ -42,9 +41,10 @@ node examples/llm-memory.ts                    # 真模型：规则版 vs 模型
 node examples/compact-day.ts                   # 真模型：上下文撑满 → 压成记忆 → 接着聊
 node examples/corpus-import.ts examples/corpus --speaker 小鹿 --summarize --reply "今天好累啊"
 npm run talk                                   # 真模型：交互式对话，走 ~/.iris/iris.db
-npm run talk -- "在吗"                         # 单发一句就退出（默认联网 + 只读文件，--offline / --no-files 关掉）
+npm run talk -- "在吗"                         # 单发一句就退出（默认联网 + 只读文件 + 抖音 + 私信，--offline / --no-files / --no-douyin 关掉；--confirm-douyin 让点赞、评论、私信重新问人）
+npm run talk -- --think                        # 同上，再打开「这一轮该想多深」的规则版自动档位
+npm run talk -- --think-llm                    # 再加分类模型兜底（规则拿不准的轮多花约 1.2 s）
 npm run web -- "今天有什么 AI 新闻"            # 不调模型，直接看搜索桥返回什么
-npm run chat                                   # 脚本化六轮，方便对比
 node examples/voice-bench.ts before            # 人味回归基线：12 条输入 → 中位字数/问号/AI 词
 npm run look -- 截图.png                       # 看图：先转述，再让她回一句
 npm run look -- 截图.png --note-only           # 只看转述，不让她说话
@@ -73,5 +73,22 @@ npm run look -- 截图.png --note-only           # 只看转述，不让她说�
 真的会去查（ADR-0025）：「让她搜」那句话本身没有查询词，长历史下她只会嘴上答「行，我来搜一个」——库里全是她接工具之前说过的假「搜过了」，接回 transcript（ADR-0021/0022）就成了「我已经查过」的证据。两条腿解决：① `looksLikeLookup()` 认出「搜/查/最新/天气/股价…」这类口吻时，那一轮第一次请求带 `tool_choice: "required"`（走 `samplingParams`，因为 pi 的 `ToolChoice` 只有 auto/none；**必须同时带 `reasoning_effort: "none"`，否则网关 400「Thinking mode does not support this tool_choice」**），工具走完的第二轮不再强制；② 同一轮在发给模型的输入末尾加一句「（这一句是新问题，要查就用这一句问的事去查，今天是…）」——只进请求不进库，历史里的同类尾巴由 `transformContext` 逐条摘掉。实测 200 条历史下：「你试试随便搜索」→ 1 次 `web_search {query:"今日热点新闻"}` 11.7 s；「印度最近出什么事了」「Sakana AI 是什么公司」不带关键词也各查 1 次，「你最近看了什么」0 次。代价是带搜索一轮 5–12 s，查询词里的年份仍会被它编。
 
 只读文件（ADR-0026）：pi 的原生工具在 coding-agent 里（ADR-0012 已裁掉），给她的只有 **ls / read / grep** 三件，`bash` / `write` / `edit` 明确不给——能改机器的能力不可逆，与「未授权不动手」冲突。`files.ts` 的 `FileGuard` 负责让与不让：根目录默认「家目录 + 当前工作目录」，deny 名单挡 .ssh / .env / .pem / .kdbx 一类，**授权单位是根目录下的第一层文件夹**，第一次碰要问人、同意后本次进程内放行，没人能问就一律拒（fail-closed）；三个工具失败只返回 `isError` 结果、不抛。prompt 里按手上真有的工具给段（`canSearch` 只认 `web_search`，`canLook` 只认文件三件），ADR-0025 的强制调工具也收窄成只在有 `web_search` 时触发——否则「帮我搜一下」会逼她去 `ls`。REPL 里她第一次碰某个文件夹会停下来问「（她想看 … 允许吗？y/N）」，也能用 `/allow <路径>` 事先放行；`--no-files` 关掉整套。实测（便签三行）：`ls → read →` 念出原文并点评一句，四轮工具首字 8.5 s；追问细节时不重复读文件，1.2 s 直接答。
+
+刷抖音（ADR-0027 / ADR-0028）：抖音的评论接口要 a_bogus 签名（jsdom + 七个 sdk）和水印 Cookie，这套东西本机插件 `dsh-douyin-scroll` 已经调通了，所以不重写——`douyin.ts` 把它的 `tools/mcp-server.mjs` 当**标准 stdio MCP 子进程**用（每次调用一个进程：握手 → `tools/call` → 收工），导出四个 pi 工具：`douyin_feed`（推荐流，默认 6 条、最多 30 条，链接只留 `https://www.douyin.com/video/<id>`）、`douyin_comments`（读评论，带楼中楼）、`douyin_like`（点爱心 / 取消）、`douyin_reply`（发一条或回某条）。
+
+**点赞和评论都不再问人**（ADR-0028）：刷到喜欢的直接点，想说话直接发，`--confirm-douyin` 才退回「逐条问 y/N」。点赞走的是另一条路——digg 是写接口，Node 侧签名 POST 一律回 `用户未登录`（只读接口同一份 Cookie 却正常），说明它额外要 ticket-guard 的请求头，那套只有页面 SDK 算得出来；所以 `browser.ts` 连插件**本来就常驻**的那台无头 Chrome（`--headless=new`，端口 9334–9373），用 CDP 在页面上下文里发 fetch——**屏幕上不会出现任何窗口**。判据也不信接口自报：digg 回的 `is_digg` 是调用前的状态，工具会紧接着读 `aweme/detail` 的 `user_digged` 复核，对不上就报失败。实测 `likeVideo('7703585367337641577')` → `{ok:true, digged:true}`、取消 → `digged:false`，全程没有新开窗口。
+
+同时把插件自己的自动轮次停了（`autoEnabled/autoComment/chatWatch = false`）——免得两个 agent 用同一个账号、两套人格各刷一遍。说什么由她自己的 prompt 决定（`## 你也能刷抖音` 八条：点爱心不用问谁、一轮顶多一两条、看两三条就够、发就用自己会说的那句、不写放谁身上都成立的空话、不提自己是 AI、发出去就收不回所以先想清楚、刷到真想让他看的就讲给他听）。实测：取一轮推荐流 11 s，评论 79 条列 8 条，一轮对话三次工具首字 14.0 / 17.9 / 2.6 s。
+
+**思考档位**（ADR-0031）：**主对话默认 `high`**（`DEFAULT_SESSION_EFFORT`，2026-11-10 定）；`--effort none|low|high` 临时改基准档，`--think` 打开规则版逐轮改档（接话继承上一轮 / 核对类硬词与长材料升 `low` / 招呼短话压 `none`），`--think-llm` 再开分类模型兜底（本机一次 1.0–1.2 s，只在规则拿不准时问）。`high` 的代价是首字从约 1 s 涨到 3–9 s（实测 103/86/130 字、3.1/6.6/8.9 s；带工具那轮 10.9 s）；短句仍然短（挨骂 12/19 字）。**强制工具那一轮永远压成 `none`**（思考模式下 `tool_choice: "required"` 会 400），`turn.effort` 报的就是实际用的档。记忆分档/提炼、看图转述这类调用不在主对话链路上，仍是 `none`。
+
+**私信只回名单上的人**（ADR-0029 / ADR-0030）：抖音的私信接口必须点名某个人，没有「列出所有会话」的入口，所以不接陌生人——名单写在 `~/.iris/contacts.json`（`IRIS_CONTACTS` 可覆盖）：
+
+```json
+{ "contacts": [{ "name": "Walk away", "id": "MS4wLjABAAAA…" }] }
+```
+
+名单外的人她读不到也回不了（空名单 = 谁都碰不了）。两个工具：`douyin_im` 看某人最近说了什么（摊成「我：…」「名字：…」，转发视频显示成「（发了个视频 <id>）」）、`douyin_dm` 回一条（≤300 字，带 `confirm: true` 走无头路径）。默认都不问人，`--confirm-douyin` 才逐条问。REPL 里 `/roster` 看当前名单。**注意：没有轮询**——只有你问她「看看私信」，她才会去读。
+
 
 模型网关：`model.ts` 只描述 endpoint（本机 Magpie `http://127.0.0.1:3425/v1`，OpenAI 兼容、免 key），默认 `deepseek/deepseek-flash` + `reasoning_effort: none`，首字 0.9–1.8 s；看图用 `workbuddy-ai/hy4free`（`MAGPIE_VISION_MODEL` 可换）。会话循环由 `session.ts` 交给 pi-agent-core 的 `Agent`，不再自写 loop。理由见 ADR-0009 / ADR-0010 / ADR-0011。

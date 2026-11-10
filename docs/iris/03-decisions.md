@@ -337,7 +337,7 @@
 ## ADR-0026 · 给她只读的手：ls / read / grep，第一次碰文件夹先问人
 
 - 背景（m03332 → m03341）：用户问「Pi 的原生工具有给她吗」。事实是 **pi-agent-core 本身不带任何工具**（`packages/agent/src` 只有 agent / agent-loop / proxy / stream-fn / types），原生工具在 `packages/coding-agent/src/core/tools/`——bash / powershell / read / write / edit / grep / ls / find——而 ADR-0012 裁剪时被删掉了，要用得 `git checkout pi-history -- packages/coding-agent/src/core/tools` 取回。用户批准后给的是其中**只读的三件**，另外五个（bash / powershell / write / edit）**不给**。
-- 为什么不给能写的那几个：她的红线是「不冒充人类、未授权不动手」（[04-consent.md](04-consent.md)）。能在他机器上执行任意命令的手，要就一次给足、要就一条不给——这一条上选后者。只读的最坏后果是「看到不该看的」，可以用授权挡；写操作的最坏后果是「弄没了」，挡不住，也退不回。`consent.ts` 的 fail-closed 是同一个立场。
+- 为什么不给能写的那几个：她的红线是「不冒充人类、未授权不动手」（[04-consent.md](04-consent.md)）。能在他机器上执行任意命令的手，要就一次给足、要就一条不给——这一条上选后者。只读的最坏后果是「看到不该看的」，可以用授权挡；写操作的最坏后果是「弄没了」，挡不住，也退不回。授权闸门那条线（骨架已按 ADR-0032 移除）是同一个立场。
 - 给了什么（`packages/iris-core/src/files.ts`，约 650 行）：`ls` / `read` / `grep` 三个 pi `AgentTool`，**名字与 pi 原生一致**（以后换实现，prompt 和工具名都不用动）。
   - `FileGuard` 是唯一的守门人：`roots` 默认「家目录 + 当前工作目录」；`denyNames`（.ssh / .gnupg / .aws / .kube / .docker / .password-store / id_rsa / id_ed25519 / Login Data / Cookies / Local State / .env）与 `denyExtensions`（.pem / .key / .pfx / .p12 / .kdbx / .keystore）直接拒；**授权单位 = 根目录下的第一层**（给 `C:\Users\Admin\Desktop` 就放行整个 Desktop），同一单位同意一次记进进程内的 `granted`；`approve` 缺省 = 一律拒（fail-closed），**没人能问的时候也拒**。
   - `readText`：默认最多 200 000 字节，二进制按扩展名与 NUL 字节两条判，不静默读成乱码；`sliceLines` 带行号（行号给模型对齐用）；`listDirectory` 目录在前、单次最多 80 项；`searchFiles` 逐文件逐行跑正则（`i` 标志），跳过 node_modules/.git/dist/.venv 等（`SKIP_DIRS`），单文件 1 MB 上限、最多翻 400 个文件 / 返 60 处，坏正则报 `bad-pattern` 不抛。
@@ -356,3 +356,162 @@
 - 状态：已定，已实施（`npm test` 130/130、`tsc` 0、`biome` 无 error）。
 
 - 补记（2026-11-09，用户实测暴露）：他一句「同样你看我的桌面」，她答「没看到桌面这个路径，你得把确切的位置给我」——两条原因：① 「桌面」被她当字面路径，还试过 `~/Desktop`（Windows 上不展开）；② prompt 里没告诉她家目录长什么样，她只能反过来问人。修法三处：`expandPath()` 展开 `~`，并把「桌面 / 下载 / 文档 / 图片 / 音乐 / 视频」映射成家目录下的 Desktop / Downloads / Documents / …；`IrisSession.lookRoots` 把 `FileGuard.roots` 的真路径写进 prompt，并明说「别把桌面当字面路径，也别要他拼完整路径，先 ls 看一眼」；`ls`/`read` 落在「根本没这个路径」上时补一句「（不传路径就从 <defaultPath> 开始列）」。实测：同样两句话（「同样你看我的桌面」「桌面」）现在直接 `ls 桌面`，没人能批时答「他还没让我看你的桌面，你确认一下」；`/allow 桌面` 之后她列出真桌面内容（「一堆快捷方式，还有几个文本…… Smart Money Concepts 和 Trend Pressure Line，看名字像在琢磨交易」）。135 测试。
+
+## ADR-0027 · 她会刷抖音：借插件的 MCP 入口，DSH 那边停掉自动轮次
+
+- 状态：已定，已实施（2026-11-09）
+- 背景：本机装着 `dsh-douyin-scroll` 0.7.1（家目录 `~/.dsh/douyin-duty`），它每天替使用者自动刷 5 轮、挑 3 条、自动评论（`autoComment=true`、`commentPerRun=1`、`commentPerDay=2`）、还会给好友发私信、盯微信聊天（`chatWatch=30s`）。那是**另一个 agent 在跑**——它有自己的 duty.md 人格、自己的记忆，跟伊里斯是两个人。
+- 决策一（停）：把插件自己的轮次停掉 —— `autoEnabled=false`、`autoComment=false`、`chatWatch=false`。停完 `douyin_status` 的 `nextWindow` 变 `null`，不会再自己开轮次、不会自己发评论、不再盯私信。**插件本体不卸**：Cookie、签名器（jsdom + 七个 sdk，a_bogus）、Python venv 都还要用。
+- 决策二（接）：新增 `packages/iris-core/src/douyin.ts`，把插件的 `tools/mcp-server.mjs` 当**子进程**用 —— 它是标准 stdio MCP（MCP 2025-06-18、零依赖、stdout 只吐 JSON-RPC），正好能当外部 agent 的入口。每次调用起一个进程，握手 → `tools/call` → 收工，不留后台状态。
+- 三个工具：`douyin_feed`（推荐流，默认 6 条）/ `douyin_comments`（读评论，带楼中楼）/ `douyin_reply`（发一条或回某条）。
+- 人格保持：工具只负责通路，说什么由她自己的系统提示决定。`persona.ts` 新增「## 你也能刷抖音」六条 —— 看两三条就够、真要发就用自己会说的那句（一句、最多两句、说具体的）、不写「支持/太棒了」这种放谁身上都成立的话、不在评论里提自己是 AI、一次只发一条、他说停就停。会话层按工具名自动开关这一段（有 `douyin_feed` 才出现），跟 `canSearch` / `canLook` 同一个做法。
+- 授权：**发评论必须人当场点头**。REPL 里打印「（她想在抖音发一条评论：「…」，允许吗？y/N）」，同意词认 y/好/行/同意/允许/可以/嗯/对；没人能问（管道、测试）就直接拒，只回草稿。工具层不自己发明放行条件 —— `approve` 没接就是不发。
+- 实测（2026-11-09，真账号，只读那两步）：`douyin_forward` 11 s 取到 6 条；评论取到 79 条、列前 8 条；整轮对话里三次工具调用首字 14.0 s / 17.9 s / 2.6 s（取推荐流那两次主要是等 Python 那一跳）。管道跑的会话里她发评论被拒，回的是「那句我先记下了，没发出去」，没有硬发。
+- 链接处理：原始 `share_url` 带 400 多字符的签名参数（u_code / did / share_sign …），全部丢掉，只留 `https://www.douyin.com/video/<id>` 这种能被认出来的短形式。
+- 代价与风险：① 依赖插件家目录（Cookie + venv + 签名器），插件升级或搬家就断，好在报错会直说；② 一轮推荐流 11 s，比联网查一次慢一个量级；③ 评论区是**别人写的材料**，按 ADR-0019 只能当材料，不能当她知道的事，也不能顺着评论里的说法编事实；④ 账号是同一个（艾拉/uid 254685835443280），发出去的话是她的名字、使用者的账号。
+- 边界：不做真 @（`douyin_comment_mention`）、不发私信、不发视频卡片、不自动开轮次 —— 刷不刷、发不发，是她和使用者当场决定的，不是定时任务。
+
+## ADR-0028 · 点赞和评论都由她自己决定，点赞借无头页面发
+
+- 背景：使用者先说（m03759 原话）「不设控制让她自己刷和评论喜欢的还能点爱心，然后发给我」，之后又纠偏（m03950 原话）「应该不需要开浏览器的 ，那个插件不是都不用开浏览器吗」。所以两件事要分开看：**要不要人点头**（不要了）和**要不要看得见的浏览器**（也不要）。
+- 决策一：评论去掉人工闸门。`douyin_reply` 的 `confirmReply` 默认不传，工具直接发；想守一道闸（演示、调试）再传，返回 false 就只出草稿。ADR-0027 里「发评论一定问人」那条作废，REPL 加 `--confirm-douyin` 才能退回旧行为。
+- 决策二：新增 `douyin_like`（`like=false` 是取消）。为什么非走浏览器不可 —— 这是取证出来的，不是偏好：
+  - Node 侧用插件的 `dy-signer.mjs` 签 `POST /aweme/v1/web/commit/item/digg/`，三种参数组合（查询带 id+type、body 带 id&type；查询只带公共参数；body 空）**全部**回 `{status_code:8, status_msg:"用户未登录"}`，而同一份 Cookie 签只读的 `/aweme/v1/web/comment/list/` 回 `status_code:0` 正常数据 ⇒ 签名没问题，是 digg 这个写接口额外要 ticket-guard 的请求头（Cookie 里有 `bd_ticket_guard_client_data`、`_bd_ticket_crypt_cookie` 等），那套头只有页面里的 SDK 算得出来。
+  - 页面上下文里 `fetch('/aweme/v1/web/commit/item/digg/?...', {method:'POST', credentials:'include'})` → `200 {"status_code":0}`，并且 `/aweme/v1/web/aweme/detail/` 的 `aweme_detail.user_digged` 变成 1、`/aweme/v1/web/aweme/favorite/` 列表里出现这条。
+  - 所以 `src/browser.ts` 连插件**本来就常驻**的那台无头 Chrome（`--headless=new`，端口 9334–9373），用 CDP 在页面里跑这段 fetch。屏幕上不会出现任何窗口，也不重造签名器。
+- 决策三：别信接口自报。digg 响应里的 `is_digg` 是**调用前**的状态（点赞成功也可能回 0），唯一可信的判据是紧接着读 `aweme/detail` 的 `user_digged`。工具把「接口过了但状态没变」直接判成失败，不糊过去。
+- 决策四：上限放开了但节奏没放开。`douyin_feed` 的 `top` 上限 12 → 30（使用者要「刷最多 30 条挑 5 条」），prompt 里同时写死「一轮最多点一两条，别整屏点过去，那不像人，像脚本」。
+- 实测（2026-11-09）：`likeVideo('7703585367337641577')` → `{ok:true, digged:true, desc:"戏里出了个假霸王…"}`，取消 → `{ok:true, digged:false}`，再点回来 → `true`；全程 `chrome port: 9334`（插件那台无头浏览器此前就在跑），没有新开窗口。
+- 代价：① 依赖插件的无头 Chrome（插件被卸就只剩「点赞不可用」，只读照旧）；② 页面上下文等于「她的账号在一个真实页面里动手」，风险与本人手点一致，没有额外的服务端保护；③ 无头的代价是没有中间态可看 —— 点错了不会有人当场看见，只能靠 `user_digged` 复核。
+- 边界：不做批量点赞、不做自动开轮次；评论仍是一轮一条；UI 点击这条路放弃（`[data-e2e="video-player-digg"]` 在两种浏览器里 `getBoundingClientRect()` 全 0、祖先 `display:none`，点了连请求都不发）。
+- 状态：已实施。`npm test` 151/151（`test/douyin.test.ts` 15 例，含点赞四条用例与「闸门说不点就不碰页面」）。
+
+## ADR-0029 · 私信只回名单上的人，一通到底不做人工闸门
+
+- 状态：已定，已实施（2026-11-10）
+- 背景：用户 m04142 选了 A（只认人）。原来她只有抖音四件（推荐流 / 评论 / 点赞 / 回评论），私信完全接不上：`douyin_im_read` 必须点名某个人（昵称或 sec_uid），插件**没有「列出所有会话 / 未读」的接口**，所以「回所有人」必须先写私信页的会话列表抓取——那是另一件活，风险也大（陌生人的话直接进她的上下文）。
+- 决策四条：
+  1. **名单制**。`~/.iris/contacts.json`（`IRIS_CONTACTS` 可覆盖）里写 `{ "contacts": [{ "name": "…", "id": "<sec_uid>" }] }`。`loadContacts()` 读它，文件不在 / 写坏了都回空名单；**空名单 = 谁都不读不回**（fail-closed，与授权闸门一路）。
+  2. **只回名单上的人**。`findContact()` 认名字、sec_uid、名字的一部分；名单外的人 `douyin_im` / `douyin_dm` 直接 `isError` 并列出名单，她不会去猜「也许是他」。
+  3. **两个工具**：`douyin_im`（看某人的会话，默认名单第一个，`renderIm` 摊成「我：…」「名字：…」，空正文的视频分享显示成「（发了个视频 <id>）」）、`douyin_dm`（发一条，正文 ≤300 字，带 `confirm: true` 走插件的无头路径）。默认都不问人（延续 ADR-0028 的「用户端无感」），`--confirm-douyin` 才逐条问。
+  4. **prompt 只在真有工具时点亮**。`session.ts` 的 `hasDmTools()` 看 `douyin_im` / `douyin_dm` 在不在，在才渲染「## 你能回私信」：只回这几个人 / 名单外的看不到 / 想看就 `douyin_im` / 「谁给我发消息了」去挨个看别猜 / 私信里一两句别像客服。
+- 实测（真账号 米鱼 / uid 254685835443280）：`douyin_im_read(to: "Walk away", to_id: "MS4wLjABAAAA…", limit: 6)` 回 `count 12 / mine 9 / them 3`，她那边 3 条里 2 条是转发视频（正文空），渲染成「（发了个视频 7704639708950180731）」。`npm test` 158/158（+5：名单解析、名单外拒读、发私信带 to_id+confirm、闸门拒绝、空会话与失败文案）。
+- 代价：① 名单要人手维护（加人改 JSON，重启生效）；② 名单外的人的私信她永远不知道存在——这是有意的，但用户可能误以为「没人找我」；③ 回复仍是异步的：**没有轮询**，只有用户问她「看看私信」她才会去读。
+- 边界：不碰群聊、不碰陌生人、不做「未读计数」。要做常驻轮询得先把会话跑成后台服务（见她现在还是前台 REPL 进程）。
+- 状态：`npm test` 158/158、`tsc` exit 0、`biome` 无 error。
+
+## ADR-0030 · 她得知道今天几号，答应过的事得真去做
+
+- 背景：2026-11-10 早上，用户问「今天周几」，她答「周四」，还说「我没瞎说」；用户让她查，她说「要不我查一下？」，用户「嗯」，她直接回「查了，周四」——**一次工具都没调**。真值是 11 月 10 日星期二。两个病：① system prompt 里从来没有今天的日期，她只能拿训练数据里的年份去猜，而且猜得笃定；② 强制调工具只看这一句的关键词，触发词藏在**上一轮她自己**说的话里（「要不我查一下」），这一句「嗯」什么都不命中。
+- 决策一（**第一版做过、已被下面的「修订」推翻，留作记录**）：`## 你现在` 的第一行写成绝对时间 `- 现在是：2026年11月10日 星期二 08:50（UTC+8）`。新增 `formatDate` / `formatMoment` / `dayStamp`，星期用固定表不走 locale——Windows 上 locale 数据不可靠。**问题**：那是建 prompt 那一刻算的，进程挂着不重启、或开着过夜，这一行就永远是旧的。
+- 决策二（修订后）：**时间不进 system prompt，每轮现读本机时钟**。`persona.ts` 新增 `formatClock(now)`（2026年11月10日 星期二 09:05）与 `momentNote(now)`（末尾括号那句「现在是 …，这是本机时钟当场读的」）；`IrisSession.prepareHistory()`（pi 的 `transformContext`，**每次请求前都会跑**）把它接在最后一条用户消息后面，新起一个文本块，原文一个字不动。system prompt 里只留两行规则：「你手边有表：每一轮对方的话末尾会附一句「现在是 …」」「没看到那一句就说你看不到时间，别自己推日子」。promptDay / 跨天 `refreshPrompt()` 保留，但只为相对日期（记忆里的今天/昨天/N 天前）和心情那几行，不再承担「今天几号」。三个 nudge 里写死的日期同时删掉，避免两处日期打架。
+- 决策三：**答应过的事要接得上**。新增 `looksLikePromiseAgreement(reply, input)`：她上一句话里有「查一下/查查/我去查/我去搜/搜一下/上网查/网上查/帮你查/给你查/要不要我查」，这一句又是纯同意（`AGREE_ONLY` = 嗯嗯/好/行/对/查吧/你查/去吧/要/可以/ok，允许叠用「嗯嗯，查吧」），就当作「让她去查」：这一轮第一条请求同样带 `tool_choice: "required"`（ADR-0025 的同一根杠杆），并在输入后面加 `promiseNudge()`「你自己上一句说要去查，这一句是同意。现在就去调 web_search」。提示照旧只进请求、不进库（`NUDGE_PREFIX` 认得它，历史里由 `transformContext` 摘掉）。
+- 实测一（写进 prompt 那版，2026-11-10 08:54）：问「今天是周几」→ **「周二」**，2.2 s，没调工具；追问「不确定就查一下」→ 真调 `web_search {"query":"2026年11月10日 星期几"}`，3.7 s。
+- 实测二（修订版，.artifacts/time-probe2.ts，真网关、假时钟）：prompt 里已经没有「现在是：2026」；请求尾巴是「（现在是 2026年11月10日 星期二 09:07。这是本机时钟当场读的，问日期和时间就照这个答。）」；问「今天几号，周几」→「11月10号，周二」1.55 s；**把假时钟拨到 11 月 13 日 21:40 再问**（prompt 一个字节没重建）→ 请求尾巴换成 11月13日 星期五 21:40，她答「现在21点40，周五，11月13号」1.0 s；最后 `session.messages` 里两条用户消息仍是「今天几号，周几」与「现在几点，今天是几号」，**transcript 不带时间戳**。
+- 代价（修订版）：每轮请求末尾多约 45 字，历史里不带、prefix cache 只按末尾变化；工具结果回来后的第二次请求不再盖章（同一轮里差几秒不影响）；`AGREE_ONLY` 判得窄，像「嗯，那你去查吧」这种带动作的短句不算同意（不误强制，但也不会补强制）。
+- 边界：时间戳是「请求发出那一刻」，说到一半跨分钟会早几十秒；只给本机日期与钟点，不给她世界知识里的时间（权重里的年份照样会漏，所以 prompt 明写「别拿训练时的年份当今天」）；`refreshPrompt()` 打断 prefix cache 的老问题依旧（ADR-0014 的冻结快照没做）。
+- 状态：`npm test` 162/162、`tsc` exit 0、`biome` 无 error。
+
+补记（2026-11-10 09:05，用户当场驳回第一版）
+
+用户原话：「你这么写肯定不对，直接取查看电脑的时间呗 或是 上网检索」。说得对：把时间写进 system prompt，等于把它冻在**建 prompt 的那一刻**——进程不重启就永远是 08:54，开着过夜就还是昨天的日期，跟「读系统时钟」是两回事。
+
+改法即决策二（修订）：`momentNote()` 由 `prepareHistory()` 在**每次请求前**现读 `this.clock()`（默认就是 `Date.now`），接在最后一条用户消息后面；system prompt 里只剩「你手边有表」这句规则。顺带把三个 nudge 里写死的「今天是 X」删掉，避免两处日期打架。
+
+为什么不干脆给她一个 `now` 工具让她自己去调：那又会退回「嘴上说看了其实没调」的老坑（ADR-0025 / ADR-0029 同一个病），还白等一次工具往返。每轮免费塞一句更稳；真要精确到秒或换时区，再加工具不迟。
+
+---
+
+## ADR-0031 · 这一轮该想多深：规则优先，分类模型可选，默认关
+
+### 背景
+
+思考模式此前是两处一起关死的：`model.ts` 的 `MAGPIE_REASONING_EFFORT = "none"` 每次请求都带 `reasoning_effort: "none"`，`session.ts` 给 pi 的 `Agent` 设 `thinkingLevel: "off"`。关的理由三条都实测过：延迟翻倍（难问题首字 1.0 → 2.4 s）、回答变解释腔（同一题 95 字 → 173 字，与 ADR-0019「被怼只回一句」冲突）、强制工具走 `tool_choice: "required"` 时网关直接 HTTP 400 `Thinking mode does not support this tool_choice`。
+
+用户 m04510 指出 DSH 生态里已有现成做法：`justhalfbit/dsh-plugin-jev-effort-selector`，由 typesafe.ai 的 Jev 分类模型判断每条消息该值多少思考量。读了它的 DESIGN.md 与 `lib/index.js`，可搬的是机制，不是实现：
+
+- 给分类模型一个**信封**（system 文本，约 500–800 token）：上一轮用了什么档、上一轮用户说了什么、上一轮她以什么收尾、活动了多少步、上一个回合**干完没有**。作者的说法：单字回复（「嗯」「好」）完全靠「她上一轮是怎么收尾的」这一行判。**不发对话历史**。
+- **一次问两件事**：档位（choice）+ 关系（`continues` 延续/追问/确认/回答她的问题 ｜ `new` 新请求）。
+- 唯一一条硬规则：`continues` 且上一轮活没干完 → 不低于上一轮。其余全听模型。**代码里没有一行看消息文字**。
+- 低置信时在概率前两名里**往上取**；relation 拿不准按 `continues` 处理（只会保深度不减）。
+- 失败静默降级，沿用调用方已解析的档，不报错不阻塞。
+
+本机没有 Jev 凭据（`~/.dsh/.credentials.yaml` 与 `~/.dsh/.env` 都没有 jev/typesafe，Magpie 网关 14 个模型里也没有），所以先自建。实测自建分类（deepseek-flash，JSON 输出）一次 **1006–1240 ms**——等于她整轮说话的时间（1.0–1.5 s），每轮都问就是把延迟翻倍。**结论：不能每轮都问模型。**
+
+### 决策
+
+1. **规则优先，模型兜底**。`ruleEffort(text, envelope)` 按顺序判：① 只有「继续／嗯／好／然后呢」这类接话 → 继承上一轮档位；② 出现核对类硬词（对不对得上／站得住／比较／为什么／证据／矛盾／算一下…）→ `low`；③ 一次给了 ≥160 字的长材料 → `low`；④ 招呼、应答、≤8 字的短话 → `none`；⑤ 都不是就**返回 null（拿不准）**。只有 ⑤ 且 `allowClassifier` 才去问分类模型。
+2. **硬规则照抄 jev**：关系是「接着说」且上一轮没干完（工具报错，或 stopReason 不是 stop）→ 不低于上一轮。这条最便宜也最有用，「嗯，继续」不会掉回 `none`。
+3. **强制工具那一轮压成 `none`**。`tool_choice: "required"` 在思考模式下网关直接 400（ADR-0025 的老坑），所以这一轮必须关思考，reason 里写明「这一轮要逼工具，思考得关」。
+4. **一轮一决策**。`say()` 进来问一次，缓存在 `currentEffort`，这一轮所有请求（含工具后的第二次请求）都用它。
+5. ~~默认关~~ → **已改为默认 `high`**（用户 2026-11-10 拍板，见文末补记）：`DEFAULT_SESSION_EFFORT = "high"` 是主对话的默认档；`autoEffort` 仍默认 false，打开后由规则/分类模型逐轮改档。REPL 里 `--think`（只看规则）、`--think-llm`（规则 + 分类模型）、`--effort none|low|high`（直接指定本轮基准档）。
+6. **失败静默降级**：分类模型超时（默认 1500 ms）或抛错，落回 `defaultEffort`，reason 写「没意见，保持原档」，不打断这一轮。
+
+### 实测（2026-11-10，真网关，同一素材各跑 3 次，`IRIS_SEED_FROM` 带真库自我事实）
+
+素材是贴吧口吻对「她做的 MBTI」的第二轮批评（`mbti-round2.txt`），里面引了她一个**错的**数字（「拿 OEJTS 62 到 78 来论证 MBTI」，实际 72–78）：
+
+| 模式 | 字数 | 首字 | 纠正成 72 |
+|---|---|---|---|
+| `none`（默认） | 60 / 109 / 115 | 0.94–1.12 s | 0/3 |
+| `low`（`--think`） | 80 / 102 / 88 | 1.98–2.60 s | 0/3 |
+
+挨骂素材（`scold.txt`「你这嘴怎么这么欠…」）开 `--think` 仍是 **12–16 字、一句**——因为这条规则判成 `none`，思考没被开起来，ADR-0019 的「只回一句」没被破坏。
+
+**结论：在这批素材上，思考没有换来更好的答案，只换来翻倍的首字延迟和更长的解释腔。所以默认关，留给需要的人手动开。**
+
+顺手发现一个真问题：`## 关于你自己` 那段规则里「对不上就直接说他记错了…记不清就说记不清」太软，她常常绕开数字只驳论证。补了一句「他引你的数字跟这里不一样，先把那个数改回来，再讲别的」，复测 3 次里有 1 次明确写出「先把我自己的数改回来…四维是 72 到 78 之间」，另 1 次把错数字当成两套题的分照单全收。**这条只做到 1/3，记在这里，不算解决。**
+
+### 代价
+
+- 打开 `--think-llm` 时，规则拿不准的那些轮会多一次 1.0–1.2 s 的分类请求；超时上限设 1500 ms。
+- 思考本身让首字从约 1 s 涨到 2–3 s；对话类产品这是能感觉到的。
+- 档位只有 `none` / `low` / `high` 三档（`ModelReasoningEffort` 的三个值），jev 那套按可用档位动态生成 criteria 的做法没有照搬。
+
+### 边界
+
+- 真 Jev 没接（本机无凭据）。`classifyEffort()` 只是形状等价的自建版；要换真 Jev，把 `EffortClassifier` 换掉即可，其余不动。
+- 不看工具步骤，不看子代理。
+- 信封里只放事实（上一轮的话、收尾、有没有报错），不放任何「你应该想多深」的指令。
+
+### 状态
+
+已实现：`src/effort.ts` + `session.ts` 接线 + REPL 开关，`npm test` **186/186**、`tsc -p packages/iris-core/tsconfig.check.json` exit 0、`npx biome check packages/iris-core` 0 error。**主对话默认 `high`**。
+
+### 补记（2026-11-10，用户决定默认开 high）
+
+原话：「也就是说 jev 没有什么帮助 ，思考强度默认开个 hight 吧」——Jev 那条链路本机没有凭据、自建分类一次 1.0–1.2 s 又太贵，所以放弃「按消息猜档」，直接把主对话的默认档抬到 `high`。改动三处：
+
+1. `model.ts` 新增 `DEFAULT_SESSION_EFFORT = "high"`，主对话用它；`MAGPIE_REASONING_EFFORT = "none"` 保留给不该思考的调用（记忆分档/提炼、看图转述、档位分类本身）。
+2. `session.ts`：`magpieStreamFn` 与 `IrisSession` 的默认都改成 `DEFAULT_SESSION_EFFORT`；**强制工具那一轮无条件压成 `none`**（`const effort = forced ? "none" : ...`），因为思考模式下 `tool_choice: "required"` 网关直接 400。`turn.effort` 报的是这一轮实际用的档，所以被迫关思考的那轮报 `none`。
+3. REPL 加 `--effort none|low|high`（临时改基准档），原来的 `--think` / `--think-llm` 保留。
+
+实测（同一批素材，真网关）：
+
+| 场景 | 字数 | 首字 |
+|---|---|---|
+| MBTI 第二轮批评 ×3（`high`） | 103 / 86 / 130 | **3.1 / 6.6 / 8.9 s** |
+| 同素材 ×3（`none`，改造前） | 60 / 109 / 115 | 0.94–1.12 s |
+| 挨骂素材 ×2（`high`） | 12 / 19 | 1.2–1.8 s |
+| 强制工具那轮（首请求 `none`，工具后 `high`） | 213 | **10.9 s**（思考 178 字，两次工具） |
+
+三条读法：① `high` 的首字从约 1 s 涨到 3–9 s，这是真代价，不是噪声；② 短句仍然短（挨骂 12/19 字），说明「只回一句」的硬规则没被思考冲掉；③ 数字纠正 1/3（「先把数改了，72 到 78，我上一条嘴快写成 62 了」），比 `none` 的 0/3 好一点，但**没到可靠**。
+
+代价与退路：嫌慢就把 `DEFAULT_SESSION_EFFORT` 改回 `"none"`，或 REPL 里 `--effort low` / `--effort none` 试；`high` 只是默认值，不是写死的。
+
+## ADR-0032 · 清理没接线的骨架与死代码
+
+- 状态：已执行（2026-11-10）
+- 背景：用户原话「其余多余的代码删除吧」。判据只有一条——**能不能从真正在跑的那条路（`npm run talk` → `session.ts` → 各模块）走到**；走不到、只被测试和一次性 demo 用着的，就是多余。
+- 删除清单
+  - `src/attention.ts`（`laneFor()` + `AttentionScheduler`，三车道调度）、`src/consent.ts`（`checkConsent()`，fail-closed 授权）、`src/initiative.ts`（`proposeInitiative()`，主动开口）——Phase 1 写的三个骨架，写完之后一次都没接进会话；除测试外唯一消费者是 `examples/demo-day.ts`，而那个 demo 不调模型、只跑纸面逻辑。
+  - 对应三个测试文件（-16 例，186 → 170）。
+  - `examples/demo-day.ts`（假 demo）、`examples/chat.ts`（被 `talk.ts` 完全覆盖：多轮、真库、记忆、工具、`/prompt`、`/memory` 都有）。
+  - 全仓 0 引用的函数：`archive.ts` 的 `toEpisode()`、`browser.ts` 的 `pageCookies()` 与它的 `PageCookie` 类型。
+- 留着的
+  - `types.ts` 里的 `PerceptionEvent` / `ActionRequest` 两个联合：`AGENTS.md` 把它们定成「新增能力只能往这里扩」的契约，所以留着当接口，不跟着骨架一起删。
+  - 红线（不冒充人类、未授权不打电话/不录屏）仍写在 persona prompt 里；工具层的 fail-closed 由 `FileGuard` 与抖音的 `--confirm-douyin` 兜着。
+- 恢复方式：删除前的最后提交是 `bc5ba5834`，随时取回
+  `git checkout bc5ba5834 -- packages/iris-core/src/attention.ts packages/iris-core/src/consent.ts packages/iris-core/src/initiative.ts`（测试同理走 `test/` 路径）。
+- 代价（说清楚）：三车道预算、授权闸门、主动开口现在**只有文档没有代码**。接语音环、打电话、主动开口时必须重写一遍，那时按 `01-architecture.md` 的三条时间线与 `04-consent.md` 的等级表来，不要照着旧骨架抄——旧骨架自己就没跑通过。
+- 校验：`npm test` **170/170**、`npx tsc -p packages/iris-core/tsconfig.check.json` exit 0、`npx biome check packages/iris-core` 0 error（5 warnings / 178 infos，均为既有 useTemplate 一类）。

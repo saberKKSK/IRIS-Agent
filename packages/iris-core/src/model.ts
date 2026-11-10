@@ -20,6 +20,13 @@ export const MAGPIE_MODEL = "deepseek/deepseek-flash";
 export const MAGPIE_REASONING_EFFORT: ModelReasoningEffort = "none";
 
 /**
+ * 主对话默认思考档（2026-11-10 用户拍板：默认 `high`）。
+ * `MAGPIE_REASONING_EFFORT` 留给「本来就不该思考」的调用：记忆分档/提炼、看图转述、档位分类本身。
+ * 强制工具那一轮例外，见 `magpieStreamFn`（思考模式下 `tool_choice: "required"` 会被网关 400）。
+ */
+export const DEFAULT_SESSION_EFFORT: ModelReasoningEffort = "high";
+
+/**
  * 眼睛用的模型。deepseek 系列在网关上收下图片后什么都不说（content 为空），
  * any/* 报 404「当前 API 不支持所选模型」，workbuddy 的 gpt-6-* / glm-5.3 报额度耗尽；
  * 只剩 hy4free 真能看图，免费，一张截图 5-9 s（ADR-0020）。

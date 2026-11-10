@@ -48,7 +48,7 @@
 | async | 1–10 s | VLM 画面理解、游戏策略、行程查询、长回复 | 答得慢，但可接受 |
 | background | 分钟级 | 主动互动决策、记忆整理、账号运营、定时观察 | 无感，可延后 |
 
-代码落点：`packages/iris-core/src/attention.ts`。`laneFor()` 决定每个事件的归属，`AttentionScheduler` 保证实时车道饿死异步车道、后台只在安静时运行。
+落点还没建：原来写好的 `attention.ts`（`laneFor()` + `AttentionScheduler`）一直没接进会话，属于纸面骨架，2026-11-10 已删除（ADR-0032）。现在只有 `session.ts` 的事件面（`delta` / `tool` / `turn_end`）在区分快慢，真接语音环时按这三条线重写。
 
 **不要做的事**：把每一帧画面丢给多模态大模型。视觉流必须先抽帧、再做 CV 事件检测（运动、场景切换、人脸、物体），只有"值得说一句"的帧才升级为 VLM 理解，并带上时间戳。
 
@@ -57,11 +57,11 @@
 | 子系统 | 现在 | 下一步 |
 |---|---|---|
 | 人格与陪伴 | `iris-core/src/persona.ts`（prompt 组装）、`types.ts`（Persona/Relationship/Mood） | 关系事件写入、情绪衰减 |
-| 记忆 | `iris-core/src/memory.ts`（Episode + 检索） | SQLite 持久化、向量召回、遗忘曲线 |
+| 记忆 | `archive.ts`（SQLite 原文归档 + 三档生命周期 + FTS5 检索）、`memory.ts`（Episode 词汇） | 向量召回、遗忘曲线 |
 | 实时语音 | — | `iris-voice`：流式 ASR、TTS、barge-in 状态机 |
 | 视觉感知 | `user.look` 事件已定义 | `iris-perception`：抽帧、CV 事件、VLM 描述 |
 | 游戏/环境 | `game.state` 事件已定义 | `iris-actions`：键盘鼠标/手柄注入、游戏状态读取适配器 |
-| 外部行动 | `consent.ts` 已定义策略 | SIP 电话、ADB 手机、直播推流 |
+| 外部行动 | 只有只读文件（`files.ts`，`FileGuard` fail-closed）与抖音（默认不问人、`--confirm-douyin` 才逐条问） | SIP 电话、ADB 手机、直播推流；做之前先重建 fail-closed 授权闸门（ADR-0032） |
 | 会话 | `session.ts`（pi `Agent` 承载） | 工具注册、steering、跨会话持久化 |
 
 ## 与 pi 的复用边界（2026-11-09 起：全量 fork，见 ADR-0010）
@@ -78,7 +78,7 @@
 仍需注意、不要整包照搬：
 
 - `pi-coding-agent` 的 TUI 与交互模型（为写代码设计，不是为陪人）。
-- 它的权限模型（面向文件读写，不是面向"给真人打电话"），授权仍走 `iris-core/src/consent.ts`。
+- 它的权限模型（面向文件读写，不是面向"给真人打电话"）。授权现在分散在工具层（`FileGuard`、抖音的 `--confirm-douyin`、红线写在 prompt 里）；打电话/直播这类不可逆动作接入前必须先把 fail-closed 闸门重建（ADR-0032）。
 
 改动纪律：改上游文件时，把"改了哪个文件、为什么"记进 `03-decisions.md`；合并 upstream 时按「保我们的行为、拿上游的结构」处理。
 

@@ -4,7 +4,7 @@
  * 这里不写自己的循环。多轮上下文、工具调用、重试、steering、中断、事件流都在
  * `Agent` / `agentLoop` 里（ADR-0011）；本文件只做四件事：
  * 1. 把四层人格（persona / state / relationship / memory）编译成 transcript 第一条 system 消息；
- * 2. 给出一个直接打本机 Magpie 的 StreamFn（reasoning_effort=none，首字 <1 s）；
+ * 2. 给出一个直接打本机 Magpie 的 StreamFn（默认 reasoning_effort=high，强制工具那轮压 none）；
  * 3. 把 pi 的 `AgentEvent` 摊平成三车道能消费的 `IrisSessionEvent`；
  * 4. 一轮结束后把对话写回 Episode、推进关系状态。
  */
@@ -26,15 +26,30 @@ import type {
 } from "./archive.ts";
 import { renderMemories } from "./archive.ts";
 import { type CompactionOptions, type Consolidation, type ContextCompactor, createCompactor } from "./context.ts";
+import {
+	chooseEffort,
+	type EffortEnvelope,
+	type EffortJudgement,
+	type EffortOptions,
+	type IrisEffort,
+} from "./effort.ts";
 import type { InMemoryMemoryStore } from "./memory.ts";
 import {
+	DEFAULT_SESSION_EFFORT,
 	LOCAL_API_KEY,
 	MAGPIE_MODEL,
 	MAGPIE_REASONING_EFFORT,
 	type ModelReasoningEffort,
 	magpieModel,
 } from "./model.ts";
-import { buildSystemPrompt, chatify, stripStageDirections, stripTrailingPeriods } from "./persona.ts";
+import {
+	buildSystemPrompt,
+	chatify,
+	dayStamp,
+	momentNote,
+	stripStageDirections,
+	stripTrailingPeriods,
+} from "./persona.ts";
 import { renderStyle } from "./style.ts";
 import type { Episode, Persona, PersonaState, Relationship } from "./types.ts";
 import type { DescribeOptions, VisionImage, VisionNote } from "./vision.ts";
@@ -68,7 +83,9 @@ export interface IrisTurn {
 	/** 整轮毫秒数。 */
 	latencyMs: number;
 	stopReason: string;
-	/** 本轮写回记忆的片段；没有记忆库时为 null。 */
+	/** 这一轮用的思考档（ADR-0031）；自动档位关着就是配置里那个。 */
+	effort: IrisEffort;
+	/** 这一轮写回记忆的片段；没有记忆库时为 null。 */
 	episode: Episode | null;
 }
 
@@ -135,12 +152,21 @@ export interface IrisSessionOptions {
 	temperature?: number;
 	maxTokens?: number;
 	timeoutMs?: number;
+	/**
+	 * 这一轮该想多深（ADR-0031）。默认 false = 恒 none；true 就按规则/分类模型现算，
+	 * 顺带认「接着干没干完的活」。
+	 */
+	autoEffort?: boolean;
+	/** 自动档位的细则（要不要问分类模型、兜底档、置信阈值）。 */
+	effort?: EffortOptions;
 	/** 上下文压缩（ADR-0023）。默认开；false 关掉；给对象可调阈值。 */
 	compact?: boolean | CompactionOptions;
 	/** 交给 pi 的工具；Phase 1 默认空。 */
 	tools?: AgentTool[];
 	/** 只读文件能看的根目录（真路径）。给了就写进 prompt，免得她拿「桌面」当字面路径去猜。 */
 	lookRoots?: readonly string[];
+	/** 名单上能回私信的人（ADR-0029）；只在不传 tools 时才需要，传了 douyin_im 就自动点亮。 */
+	dmNames?: readonly string[];
 	/** 写回记忆的默认标签。 */
 	episodeTags?: readonly string[];
 	/** 时间源，测试可注入。 */
@@ -167,6 +193,11 @@ export interface MagpieStreamOptions {
 	 * 原样并进请求体、且在具名字段之后（openai-completions.ts:995），正好适合这种供应商参数。
 	 */
 	forceToolCall?: () => boolean;
+	/**
+	 * 每次请求现问一次：这一条用哪档思考（ADR-0031）。会话按轮决策后从这里读，
+	 * 一轮里的后续请求（工具回来再问一次）复用同一个档。
+	 */
+	effort?: () => ModelReasoningEffort;
 }
 
 const DEFAULT_STATE: PersonaState = {
@@ -188,16 +219,18 @@ function defaultRelationship(now: number): Relationship {
 export function magpieStreamFn(options: MagpieStreamOptions = {}): StreamFn {
 	const apiKey = options.apiKey ?? LOCAL_API_KEY;
 	const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-	const reasoningEffort = options.reasoningEffort ?? MAGPIE_REASONING_EFFORT;
+	const reasoningEffort = options.reasoningEffort ?? DEFAULT_SESSION_EFFORT;
 	return (model, context, callOptions) => {
 		const forced = options.forceToolCall?.() === true;
+		// 强制工具那一轮必须关思考：思考模式下网关不支持 tool_choice: "required"。
+		const effort = forced ? "none" : (options.effort?.() ?? reasoningEffort);
 		const request: SimpleStreamOptions = {
 			...(callOptions ?? {}),
 			apiKey,
 			timeoutMs,
 			samplingParams: {
 				...callOptions?.samplingParams,
-				reasoning_effort: reasoningEffort,
+				reasoning_effort: effort,
 				...(forced ? { tool_choice: "required" } : {}),
 			},
 			...(options.temperature === undefined ? {} : { temperature: options.temperature }),
@@ -221,25 +254,67 @@ const LOOKUP_VETO = /记忆|记住|我们上次|上次说|之前说|聊天记录
 
 /** 强制查时附在输入后面那句提示的开头，用来在历史里认出来并摘掉。 */
 const NUDGE_START = "\n\n（这一句是新问题";
+/** 让她去看私信时那句提示的开头（ADR-0029 的同类问题：嘴上说「我去看看」不算）。 */
+const DM_NUDGE_START = "\n\n（这一句是让你去看私信";
+/** 上一轮她自己说要查、这一轮同意了：这句提示开头同样以「这一句是」起手，方便摘历史。 */
+const PROMISE_NUDGE_START = "\n\n（这一句是让你去把上一条答应的事查掉";
+/** 两种提示共有的前缀，摘历史时认它。 */
+const NUDGE_PREFIX = "\n\n（这一句是";
+
+/** 这句是在问私信。 */
+const DM_HINT = /私信|私聊|谁给我发|给我发|谁找我|有什么消息|消息记录|未读|\bdm\b/i;
 
 /**
- * 附在输入后面的那句：只查这一句，别接着上一句查；顺带把今天的日期给她，
- * 否则她会给「今天天气」配一个凭空的日期（实测给成 2026 年 8 月）。
+ * 附在输入后面的那句：只查这一句，别接着上一句查。
+ * 日期不再写在这里——每轮末尾都有现读本机时钟的 momentNote（ADR-0030 修订）。
  * 导出给测试与排查用。
  */
-export function lookupNudge(now: number): string {
-	const date = new Date(now);
-	const day = `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
-	return `${NUDGE_START}。要查就用这一句问的事去查，别拿上一句的题目去搜。今天是 ${day}，要带日期就带这个。）`;
+export function lookupNudge(): string {
+	return `${NUDGE_START}。要查就用这一句问的事去查，别拿上一句的题目去搜。日期看末尾那句时间。）`;
 }
 
 /** 从文本里摘掉提示；只认末尾那一整段括号。 */
 export function stripNudgeText(text: string): string {
-	const index = text.lastIndexOf(NUDGE_START);
+	const index = text.lastIndexOf(NUDGE_PREFIX);
 	if (index < 0) return text;
 	const tail = text.slice(index).trimEnd();
 	if (!tail.endsWith("）")) return text;
 	return text.slice(0, index).trimEnd();
+}
+
+/** 答应过要查、对方点头了：这一句就是去查，别再问一遍。 */
+export function promiseNudge(): string {
+	return `${PROMISE_NUDGE_START}。你自己上一句说要去查，这一句是同意。现在就去调 web_search，查完再说结论。）`;
+}
+
+/** 让她去看私信时附的那句：点名用 douyin_im，没看到就说没看到。 */
+export function dmNudge(): string {
+	return `${DM_NUDGE_START}。要用 douyin_im 把名单上的人真看一遍，再说看到了什么；没看到就说没看到，别猜别编。）`;
+}
+
+/** 她上一条自己说要查（「要不我查一下？」）。下一句只要是同意，就得真去查。 */
+const PROMISE_LOOKUP = /查一下|查查|我去查|我去搜|搜一下|上网查|网上查|帮你查|给你查|要不要我查/;
+
+/** 只表示同意的短句（可以叠：「嗯嗯，查吧」）。 */
+const AGREE_WORD = "(?:嗯+|好+|行|对|是|查吧|你查|去吧|要|可以|ok|okay)";
+const AGREE_ONLY = new RegExp(`^\\s*${AGREE_WORD}(?:[，,、~～\\s]*${AGREE_WORD})*[。.!！?？~～\\s]*$`, "iu");
+
+/**
+ * 上一句她答应要去查、这一句是同意——把这句变成「现在就去调工具」。
+ *
+ * 实测：她答「我没瞎说 / 要不我查一下？」，对方说「嗯」，她直接回「查了，周四」，
+ * 一次工具都没调。嘴上说查了不算（ADR-0025 的同一个病，只是触发词藏在上一轮）。
+ */
+export function looksLikePromiseAgreement(reply: string | null, input: string): boolean {
+	if (reply === null) return false;
+	if (!PROMISE_LOOKUP.test(reply)) return false;
+	return AGREE_ONLY.test(input.trim());
+}
+
+export function looksLikeDm(text: string): boolean {
+	const flat = text.trim();
+	if (flat.length === 0) return false;
+	return DM_HINT.test(flat);
 }
 
 export function looksLikeLookup(text: string): boolean {
@@ -260,13 +335,26 @@ function stripNudge(message: AgentMessage): AgentMessage {
 	if (!Array.isArray(content)) return message;
 	let changed = false;
 	const blocks = content.map((block) => {
-		if (block.type !== "text" || !block.text.includes(NUDGE_START)) return block;
+		if (block.type !== "text" || !block.text.includes(NUDGE_PREFIX)) return block;
 		const text = stripNudgeText(block.text);
 		if (text === block.text) return block;
 		changed = true;
 		return { ...block, text };
 	});
 	return changed ? { ...message, content: blocks } : message;
+}
+
+/**
+ * 把时间戳接在最后一条用户消息后面（新起一个文本块，原文一个字不动）。
+ * 只盖这一轮：工具结果回来之后最后一条不是用户消息，说明这一轮她已经看过时间了。
+ */
+function stampMoment(messages: readonly AgentMessage[], note: string): AgentMessage[] {
+	const last = messages.at(-1);
+	if (last === undefined || last.role !== "user") return [...messages];
+	const content = last.content;
+	if (typeof content === "string") return [...messages.slice(0, -1), { ...last, content: content + note }];
+	if (!Array.isArray(content)) return [...messages];
+	return [...messages.slice(0, -1), { ...last, content: [...content, { type: "text", text: note }] }];
 }
 
 function lastAssistant(messages: readonly AgentMessage[]): AssistantMessage | null {
@@ -320,6 +408,7 @@ export class IrisSession {
 	private readonly toolNames: Set<string>;
 	/** 只读文件的起点，写进 prompt 用（ADR-0026 补丁：她原来不知道家目录长什么样）。 */
 	private readonly lookRoots: readonly string[];
+	private readonly dmNames: readonly string[];
 	private restoredCount = 0;
 	private styleName: string | null;
 	private readonly episodeTags: readonly string[];
@@ -335,6 +424,24 @@ export class IrisSession {
 	private forcedToolChoices = 0;
 	/** 这一轮真的调过几次工具，用来判断她是不是又在嘴上说「搜过了」。 */
 	private toolCallsThisTurn = 0;
+	/** system prompt 里那一行日期是按哪天写的；跨天就重刷，免得她拿昨天的日子当今天。 */
+	private promptDay = "";
+	/** 她上一轮说的话。用来认「要不我查一下？」这种自己答应的事。 */
+	private lastReply: string | null = null;
+	/** 自动档位（ADR-0031）：关掉时这一轮永远走 `reasoningEffort`。 */
+	private readonly autoEffort: boolean;
+	private readonly effortOptions: EffortOptions;
+	/** 这一轮实际用的档位；streamFn 每次请求都从这里读。 */
+	private currentEffort: IrisEffort | null = null;
+	/** 这一轮的档位是怎么定的（给日志和 REPL 看）。 */
+	private effortJudgement: EffortJudgement | null = null;
+	/** 上一轮对方说的话 / 调了几次工具 / 工具报错几次 / 活干完没有。信封就靠这几样。 */
+	private lastInput = "";
+	private lastToolCalls = 0;
+	private lastToolErrors = 0;
+	private lastUnfinished = false;
+	/** 这一轮工具报错过几次（收尾时折进 lastToolErrors）。 */
+	private toolErrorsThisTurn = 0;
 
 	constructor(options: IrisSessionOptions) {
 		this.persona = options.persona;
@@ -353,6 +460,8 @@ export class IrisSession {
 		this.episodeTags = options.episodeTags ?? ["对话"];
 		this.clock = options.clock ?? Date.now;
 		this.listener = options.onEvent;
+		this.autoEffort = options.autoEffort === true;
+		this.effortOptions = options.effort ?? {};
 		this.state = options.state ?? DEFAULT_STATE;
 		this.bond = options.relationship ?? defaultRelationship(this.clock());
 
@@ -360,6 +469,7 @@ export class IrisSession {
 		// 构造发生在 buildPrompt() 之前：prompt 里写「你能上网 / 你能看文件」要使真手上有的工具。
 		this.toolNames = new Set((options.tools ?? []).map((tool) => tool.name));
 		this.lookRoots = options.lookRoots ?? [];
+		this.dmNames = options.dmNames ?? [];
 		// 先把会话行定下来，再拿它接历史：重启复用的是同一条会话，不是又一条新的。
 		this.conversationId = this.startConversation();
 		const model = magpieModel(options);
@@ -374,7 +484,13 @@ export class IrisSession {
 				// 上次没聊完的直接接上，不是从零开始（ADR-0021）。
 				messages: this.restoreTranscript(options),
 			},
-			streamFn: options.streamFn ?? magpieStreamFn({ ...options, forceToolCall: () => this.takeForcedToolCall() }),
+			streamFn:
+				options.streamFn ??
+				magpieStreamFn({
+					...options,
+					forceToolCall: () => this.takeForcedToolCall(),
+					effort: () => this.currentEffort ?? options.reasoningEffort ?? DEFAULT_SESSION_EFFORT,
+				}),
 			// 每次请求前：把强制查那句提示从历史里摘掉，再按预算压缩（ADR-0023 / ADR-0025）。
 			transformContext: (messages: readonly AgentMessage[]) => this.prepareHistory(messages),
 		});
@@ -383,6 +499,11 @@ export class IrisSession {
 
 	get model(): string {
 		return this.agent.state.model.id;
+	}
+
+	/** 这一轮的档位是怎么定的；自动档位关着就是 null（ADR-0031）。 */
+	get effort(): EffortJudgement | null {
+		return this.effortJudgement;
 	}
 
 	/** 当前这条会话的 id。重启后还是同一条（ADR-0022）；没接归档层就是 null。 */
@@ -454,6 +575,8 @@ export class IrisSession {
 	 */
 	async say(input: string, hooks: IrisSessionHooks = {}): Promise<IrisTurn> {
 		if (this.agent.state.isStreaming) await this.agent.waitForIdle();
+		// 跨夜了就把日期那一行换掉，否则第二天她还拿着昨天的 prompt 说今天（实测把周二说成周四）。
+		if (this.promptDay !== dayStamp(this.clock())) this.refreshPrompt();
 
 		const startedAt = performance.now();
 		this.runStartedAt = startedAt;
@@ -461,12 +584,35 @@ export class IrisSession {
 		this.hook = hooks.onEvent ?? null;
 		// 她要出去查，就把第一条请求的工具强制出来（ADR-0025）。只有一条：查出结果后照常说话。
 		this.toolCallsThisTurn = 0;
+		this.toolErrorsThisTurn = 0;
 		// 只有联网工具时强制一次工具调用；只给了文件工具时不逼她——那会变成被迫 ls 一遍。
-		const lookup = this.toolNames.has("web_search") && looksLikeLookup(input);
-		this.forcedToolChoices = lookup ? 1 : 0;
+		const hasSearch = this.toolNames.has("web_search");
+		// 上一轮她说「要不我查一下」，这一轮对方「嗯」——不强制她就直接答「查了」。
+		const promised = hasSearch && looksLikePromiseAgreement(this.lastReply, input);
+		const lookup = hasSearch && (promised || looksLikeLookup(input));
+		// 问私信同理：她要是不调工具，就会照着上一段聊天编一句「他说：你在吗」。
+		const wantsDm = this.toolNames.has("douyin_im") && looksLikeDm(input) && lookup === false;
+		const forcedTools = lookup || wantsDm;
+		this.forcedToolChoices = forcedTools ? 1 : 0;
+		// 这一轮想多深（ADR-0031）。要在 agent.prompt 之前定好：streamFn 每次请求都读它。
+		// 自动档位关着就恒走 reasoningEffort，跟她一路的行为一致。
+		if (this.autoEffort) {
+			const judged = await this.decideEffort(input, forcedTools);
+			this.effortJudgement = judged;
+			this.currentEffort = judged.effort;
+		} else {
+			this.effortJudgement = null;
+			this.currentEffort = null;
+		}
 		// 强制出来的工具调用由模型决定搜什么。历史里挂着一句没答完的话时，它会照着旧题目搜，
 		// 所以这里把「这一句是新问题」说清楚——只影响本轮发给模型的输入，归档的仍是原话。
-		const promptInput = lookup ? input + lookupNudge(this.clock()) : input;
+		const promptInput = wantsDm
+			? input + dmNudge()
+			: promised
+				? input + promiseNudge()
+				: lookup
+					? input + lookupNudge()
+					: input;
 		const emit = (event: IrisSessionEvent): void => {
 			this.listener?.(event);
 			hooks.onEvent?.(event);
@@ -520,6 +666,8 @@ export class IrisSession {
 			firstTokenMs: Math.round(this.firstTokenMs),
 			latencyMs: Math.round(performance.now() - startedAt),
 			stopReason: message.stopReason,
+			effort:
+				this.currentEffort ?? (forcedTools ? "none" : (this.effortOptions.defaultEffort ?? DEFAULT_SESSION_EFFORT)),
 			episode: null,
 		};
 
@@ -544,6 +692,12 @@ export class IrisSession {
 		}
 
 		this.archiveTurn(input, text, at);
+		this.lastReply = text;
+		// 下一轮的「信封」：上一句说了什么、调了几次工具、活干完没有。
+		this.lastInput = input;
+		this.lastToolCalls = this.toolCallsThisTurn;
+		this.lastToolErrors = this.toolErrorsThisTurn;
+		this.lastUnfinished = this.toolErrorsThisTurn > 0 || message.stopReason !== "stop";
 		emit({ type: "turn_end", turn });
 		this.hook = null;
 		return turn;
@@ -603,6 +757,28 @@ export class IrisSession {
 			{ role: "assistant", content: reply, at },
 		];
 		this.archive.appendTurns(this.conversationId, turns);
+	}
+
+	/**
+	 * 定这一轮的档位（ADR-0031）。
+	 *
+	 * 信封里的东西全部来自上一轮的事实，不塞指令——分类靠事实，写指令等于自己判。
+	 * 强制工具那一条请求必须落到 none：网关在思考模式下对 `tool_choice: "required"` 直接 400，
+	 * 所以「要她真去查」和「让她多想」在同一轮里不能并存，查优先。
+	 */
+	private async decideEffort(input: string, forcedTools: boolean): Promise<EffortJudgement> {
+		const envelope: EffortEnvelope = {
+			...(this.effortJudgement === null ? {} : { previousEffort: this.effortJudgement.effort }),
+			...(this.lastInput.length === 0 ? {} : { userText: this.lastInput }),
+			...(this.lastReply === null ? {} : { assistantTail: this.lastReply }),
+			toolCalls: this.lastToolCalls,
+			unfinished: this.lastUnfinished,
+		};
+		const judged = await chooseEffort(input, envelope, this.effortOptions);
+		if (forcedTools && judged.effort !== "none") {
+			return { ...judged, effort: "none", reason: `${judged.reason}；这一轮要逼工具，思考得关` };
+		}
+		return judged;
 	}
 
 	/** 复用上一次的会话行；没有（或者关掉复用）就新开一条。 */
@@ -666,12 +842,17 @@ export class IrisSession {
 	}
 
 	/** 手上有只读文件三件里的任何一件（ADR-0026）。 */
+	private hasDmTools(): boolean {
+		return this.toolNames.has("douyin_im") || this.toolNames.has("douyin_dm");
+	}
+
 	private hasFileTools(): boolean {
 		return this.toolNames.has("ls") || this.toolNames.has("read") || this.toolNames.has("grep");
 	}
 
 	private buildPrompt(): string {
 		const now = this.clock();
+		this.promptDay = dayStamp(now);
 		const remembered = this.remembered(now);
 		const selfFacts = this.selfFactLines();
 		const style = this.styleText();
@@ -688,6 +869,8 @@ export class IrisSession {
 			...(style === undefined ? {} : { style }),
 			...(this.toolNames.has("web_search") ? { canSearch: true } : {}),
 			...(this.hasFileTools() ? { canLook: true } : {}),
+			...(this.toolNames.has("douyin_feed") ? { canWatch: true } : {}),
+			...(this.hasDmTools() ? { canDm: true, dmNames: this.dmNames } : {}),
 			...(this.hasFileTools() && this.lookRoots.length > 0 ? { lookRoots: this.lookRoots } : {}),
 			now,
 		});
@@ -737,13 +920,19 @@ export class IrisSession {
 	}
 
 	/**
-	 * pi 每次请求前都会叫这里：先摘掉强制查留下的那句提示（它只是这一次的脚注，
-	 * 留在历史里她会当成对方一直在说），没超预算就原样放行。
+	 * pi 每次请求前都会叫这里：
+	 * ① 摘掉强制查留下的那句提示（它只是这一次的脚注，留在历史里她会当成对方一直在说）；
+	 * ② 超预算就压；
+	 * ③ 把**这一刻**的时间盖在今天这条用户消息后面——system prompt 里的时间是建 prompt 那一刻的，
+	 * 开着过夜就成了昨天的日期（用户实测就是这么拿到「周四」的）。历史消息不带时间戳，
+	 * 所以每轮变化的部分只在末尾，prefix cache 不受影响。
 	 */
 	private async prepareHistory(messages: readonly AgentMessage[]): Promise<AgentMessage[]> {
-		const cleaned = messages.map((message) => stripNudge(message));
-		if (this.compactor === null) return cleaned;
-		return await this.compactor.compact(cleaned);
+		// 最后一条是本轮刚发出去的：那句脚注得让它看见，否则等于没加。
+		const last = messages.length - 1;
+		const cleaned = messages.map((message, index) => (index === last ? message : stripNudge(message)));
+		const compacted = this.compactor === null ? cleaned : await this.compactor.compact(cleaned);
+		return stampMoment(compacted, momentNote(this.clock()));
 	}
 
 	/**
@@ -805,6 +994,7 @@ export class IrisSession {
 				return;
 			}
 			case "tool_execution_end": {
+				if (event.isError) this.toolErrorsThisTurn += 1;
 				this.emit({
 					type: "tool_end",
 					toolCallId: event.toolCallId,

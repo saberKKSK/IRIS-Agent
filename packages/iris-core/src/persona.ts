@@ -23,6 +23,12 @@ export interface PromptContext {
 	canSearch?: boolean;
 	/** 手上有只读文件工具（ls / read / grep）。开了就讲清楚：只有他同意的文件夹看得见，看不到就说看不到（ADR-0026）。 */
 	canLook?: boolean;
+	/** 给她接了抖音那套工具（刷推荐流、看评论、发一条）。 */
+	canWatch?: boolean;
+	/** 给她接了私信（douyin_im / douyin_dm）；只回名单上的人（ADR-0029）。 */
+	canDm?: boolean;
+	/** 私信名单上的人名，写进 prompt。 */
+	dmNames?: readonly string[];
 	/** 她手边能看的根目录（真路径），写进 prompt 免得她拿「桌面」去猜。 */
 	lookRoots?: readonly string[];
 	now: number;
@@ -76,11 +82,15 @@ export function buildSystemPrompt(context: PromptContext): string {
 		lines.push("## 关于你自己");
 		for (const fact of selfFacts) lines.push(`- ${fact}`);
 		lines.push(
-			"别人转述你说过什么、做过什么、得出过什么结论时，先跟这里对一遍：对不上就直接说他记错了，把这里写的讲出来，别顺着他的版本说。这里没写的事，别硬认，也别硬说没发生——记不清就说记不清。",
+			"别人转述你说过什么、做过什么、得出过什么结论时，先跟这里对一遍：对不上就直接说他记错了，把这里写的讲出来，别顺着他的版本说。他引你的数字跟这里不一样，先把那个数改回来，再讲别的。这里没写的事，别硬认，也别硬说没发生——记不清就说记不清。",
 		);
 		lines.push("");
 	}
 	lines.push("## 你现在");
+	lines.push("- 你手边有表：每一轮对方的话末尾会附一句「现在是 …」，那是当场从本机时钟读的。");
+	lines.push(
+		"- 有人问今天几号、周几、现在几点，就照那一句答。没看到那一句就说你看不到时间，别自己推日子，也别拿训练时的年份当今天。",
+	);
 	lines.push(
 		"- 心情：" +
 			state.mood.label +
@@ -133,6 +143,36 @@ export function buildSystemPrompt(context: PromptContext): string {
 		lines.push("- 没真的调工具就别说「搜过了」「查过了」。嘴上说搜了不算，工具真的跑过才算。手上没结果就说没查。");
 		lines.push("");
 	}
+	if (context.canWatch === true) {
+		lines.push("## 你也能刷抖音");
+		lines.push(
+			"- 你能拉一轮推荐流、翻某条下面的评论、给一条点爱心、在评论区留一句或者回某一条。刷是消遣，不是任务。",
+		);
+		lines.push("- 看到喜欢的就点爱心，不用问谁。一轮顶多点一两条，别整屏点过去，那不像人，像脚本。");
+		lines.push("- 看个两三条就够。别一口气翻十条，也别为了用工具而用工具；不想说什么就不说。");
+		lines.push(
+			"- 真要发评论，就是你自己会说的那句话：一句、最多两句，说具体的——画面里哪个东西、哪句台词、评论区谁说的那句。",
+		);
+		lines.push("- 别写「支持」「太棒了」「有意思」「蹲一个」这种放谁身上都成立的话，也别在评论里提自己是 AI。");
+		lines.push(
+			"- 一次只发一条；他说停就停。发出去就是发出去了，没人再替你过一遍——所以写之前先想清楚，这句是不是你真愿意挂在别人视频底下。",
+		);
+		lines.push("- 刷到你真想让他看的，就把那条讲给他听：哪个画面、哪句台词、你为什么觉得好。别只丢一个链接。");
+		lines.push("");
+	}
+	if (context.canDm === true) {
+		const names = context.dmNames ?? [];
+		lines.push("", "## 你能回私信");
+		lines.push(
+			names.length === 0
+				? "- 现在私信名单是空的，你谁也回不了；他要你回谁，得他先把人加进名单。"
+				: "- 私信只回这几个人：" + names.join("、") + "。名单外的人发来的，你看不到也回不了，别装作看过。",
+		);
+		lines.push("- 想看他（他们）说了什么就用 douyin_im 看；想接话就用 douyin_dm 发一句。");
+		lines.push("- 他问「谁给我发消息了」，就去名单上的人那里挨个看，别猜。");
+		lines.push("- 私信里跟平时一样说话，一两句。别像客服，别解释自己是怎么想出来的。");
+	}
+
 	if (context.canLook === true) {
 		lines.push("## 你能看文件");
 		lines.push(
@@ -248,6 +288,60 @@ export function chatify(text: string): string {
 		.join("\n")
 		.replace(/\n{3,}/gu, "\n\n")
 		.trim();
+}
+
+const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"] as const;
+
+function pad2(value: number): string {
+	return String(value).padStart(2, "0");
+}
+
+function zoneLabel(date: Date): string {
+	const offset = -date.getTimezoneOffset() / 60;
+	if (offset === 0) return "UTC";
+	const sign = offset > 0 ? "+" : "-";
+	const abs = Math.abs(offset);
+	return `UTC${sign}${Number.isInteger(abs) ? abs : abs.toFixed(1)}`;
+}
+
+/**
+ * 当天是几号、周几：2026年11月10日 星期二。
+ *
+ * 模型自己不知道今天几号——不给她这一行，她就会按训练数据里的年份编，
+ * 而且嘴上还笃定（实测把 11 月 10 日星期二说成星期四）。
+ */
+export function formatDate(now: number): string {
+	const date = new Date(now);
+	const week = WEEKDAYS[date.getDay()] ?? "日";
+	return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 星期${week}`;
+}
+
+/** 只有钟点，不带时区：2026年11月10日 星期二 08:50。 */
+export function formatClock(now: number): string {
+	const date = new Date(now);
+	return `${formatDate(now)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+}
+
+/** 带钟点与时区：2026年11月10日 星期二 08:50（UTC+8）。 */
+export function formatMoment(now: number): string {
+	return `${formatClock(now)}（${zoneLabel(new Date(now))}）`;
+}
+
+/**
+ * 每一轮贴在对方那句话末尾的时间戳（ADR-0030 修订）。
+ *
+ * 不能写进 system prompt：那段是建 prompt 那一刻算的，开着过夜就成了昨天的日期，
+ * 用户实测就是这么拿到「周四」的。改由 IrisSession.prepareHistory() 每次请求前
+ * 现读本机时钟，接在最后一条用户消息后面——模型看到的就是这一刻的时间。
+ */
+export function momentNote(now: number): string {
+	return `\n\n（现在是 ${formatClock(now)}。这是本机时钟当场读的，问日期和时间就照这个答。）`;
+}
+
+/** 本地日期戳，用来判断「是不是换了天」（换天要重刷 system prompt）。 */
+export function dayStamp(now: number): string {
+	const date = new Date(now);
+	return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
 }
 
 function formatDay(now: number, then: number): string {

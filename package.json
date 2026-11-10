@@ -11,8 +11,6 @@
 		"check": "npx biome check packages/iris-core && npx tsc -p packages/iris-core/tsconfig.check.json",
 		"test": "npm --prefix packages/iris-core run test",
 		"live": "npm --prefix packages/iris-core run live",
-		"demo": "npm --prefix packages/iris-core run demo",
-		"chat": "npm --prefix packages/iris-core run chat",
 		"talk": "npm --prefix packages/iris-core run talk",
 		"bench": "npm --prefix packages/iris-core run bench",
 		"web": "npm --prefix packages/iris-core run web"

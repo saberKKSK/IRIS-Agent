@@ -9,7 +9,7 @@
 | per_call | 每次都要用户当场确认，带一次性 token | call、post |
 | forbidden | 永不执行 | 冒充人类、未授权录屏/直播 |
 
-实现：`packages/iris-core/src/consent.ts`，缺 token、token 不匹配、过期，全部拒绝。
+实现状态：早期写过 `consent.ts`（`checkConsent()`，缺 token / token 不匹配 / 过期一律拒），但一直没接进任何动作执行器，2026-11-10 随其他未接线骨架一起删除（ADR-0032）。**规则本身仍然生效**：红线写在 persona prompt 里，工具层用 `FileGuard` 与抖音的确认开关兜。接电话/直播时必须先把这个 fail-closed 闸门重建。
 
 ## 电话
 
