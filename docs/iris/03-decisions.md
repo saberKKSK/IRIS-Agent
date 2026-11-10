@@ -986,6 +986,15 @@ Go 侧：`func (s *Shell) MoveBy(dx, dy float64)` → `moveByWindow(hwnd, dx, dy
 
 **写的时机是关键**：这个 fork 每帧的顺序是 `motionManager.update` → `expressionManager.update` → `eyeBlink.updateParameters` → `saveParameters` → `updateNaturalMovements`（呼吸）→ **`physics.evaluate`** → `pose.updateParameters` → **`updateFocus()`** → emit `beforeModelUpdate` → `model.update()`。我们的 `drive()` 挂在 `beforeModelUpdate` 上，正好压在 physics 和 updateFocus **之后**，谁也盖不掉；物理的 Output 里含 `ParamAngleX/Y/Z`，写在前面是白写。
 
+### 修法九：表情别用 fork 的 ExpressionManager，自己互斥地写开关参数
+
+这个模型的表情（23 张）不是「调表情参数」，而是作者用 `key1..key13`、`Clothes1..5`、`Movement1/3` 当**部件开关**，每张 exp3.json 里就是几条 `Add`：`blush → key7=1`、`heart_eyes → key4=1`、`dark_face → key1=1`、`swirl_eyes → key3=1, key4/5/6=0`。
+
+fork 的 `model.expression(id)` 能返回 true、`motionManager.expressionManager` 也建出来了（23 个 definitions 名字都对），但它的语义是「加在上一张脸上」：连开五张之后 `key1..key7` 全部留在 1，眼睛被一层层遮罩盖住，实测变成两个灰洞，再调 `body_default` 也回不来（`key` 是 Add，不会自己归零）。
+
+改成自己管：`setExpression(id)` 读模型里的 `settings.expressions` 找 `Name`，`fetch` 那张 exp3.json（缓存），把 `Parameters` 摊成 `参数名→值`；新的目标集合 = 这张表情的参数 **并上** 上一次碰过的参数（其余归 0），`drive()` 里按 `dt*6` 淡过去写 `put()`。这样表情天然互斥，随手能回去。
+
+实测（真机逐张）：`blush` 两颊泛红、`heart_eyes` 瞳孔变成爱心、`swirl_eyes` 空心圈眼、`distressed_eyes` 变成 >< 闭眼、`body_default` 回到正常蓝眼睛。
 ### 一个坑（不是改法）：空输入区必须是 nil
 
 `SetInputRegion` 收到空列表时**不能传长度为 0 的非 nil 切片**——mygo 按 `inputRegion != nil` 判断 layered（`window.go:1321-1329`），`make([]Rectangle,0,…)` 会让窗口从第一帧起就是 layered。改成 `var out []mygo.Rectangle`（空即 nil），语义是「整窗吃鼠标」。

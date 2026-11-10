@@ -78,6 +78,10 @@ export class Stage {
 	private core: CoreModel | null = null;
 	/** 参数名 → 下标（fork 只认 CubismId 对象，字符串 id 会静默失效，见 buildParams 注释）。 */
 	private params: Map<string, number> | null = null;
+	/** 表情的当前值 / 目标值（参数名 → 数值），以及 exp3.json 的解析缓存。 */
+	private exprValues = new Map<string, number>();
+	private exprTargets = new Map<string, number>();
+	private exprCache = new Map<string, Map<string, number>>();
 	private status: (text: string) => void = () => {};
 	private base = "/live2d";
 
@@ -247,15 +251,47 @@ export class Stage {
 		}
 	}
 
-	/** 切换表情（表达式 id 见 model3 的 Expressions）。失败就当没这个表情。 */
+	/**
+	 * 切换表情（id 见 model3 的 Expressions，比如 blush / heart_eyes / dark_face）。
+	 *
+	 * 不调 fork 的 model.expression()：那个 ExpressionManager 是「加在上一张脸上」的语义，
+	 * 连开几个之后 key1..key13 会全部留在 1（作者用这些 key 当部件开关），眼睛被一层层
+	 * 遮罩盖住，实测变成两个灰洞、调 body_default 也回不来。这里自己读 exp3.json、
+	 * 互斥地写这些开关参数，没被这张表情用到的 key 一律收回 0。
+	 */
 	async setExpression(id: string): Promise<void> {
-		const model = this.model;
-		if (model === null) return;
-		try {
-			await model.expression(id);
-		} catch {
-			/* 模型里没有这个表情，忽略 */
+		const targets = await this.loadExpression(id);
+		if (targets === null) return;
+		const names = new Set<string>([...this.exprValues.keys(), ...this.exprTargets.keys(), ...targets.keys()]);
+		const next = new Map<string, number>();
+		for (const name of names) {
+			next.set(name, targets.get(name) ?? 0);
+			if (!this.exprValues.has(name)) this.exprValues.set(name, 0);
 		}
+		this.exprTargets = next;
+	}
+
+	/** 读一张表情的 exp3.json，缓存下来；模型里没这张就返回 null。 */
+	private async loadExpression(id: string): Promise<Map<string, number> | null> {
+		const cached = this.exprCache.get(id);
+		if (cached !== undefined) return cached;
+		const settings = (
+			this.model as unknown as {
+				internalModel?: { settings?: { expressions?: { Name?: string; File?: string }[] } };
+			} | null
+		)?.internalModel?.settings?.expressions;
+		const entry = settings?.find((item) => item.Name === id);
+		if (entry?.File === undefined) return null;
+		const url = this.base + "/" + entry.File.split("/").map((part) => encodeURIComponent(part)).join("/");
+		const response = await fetch(url);
+		if (!response.ok) return null;
+		const json = (await response.json()) as { Parameters?: { Id?: string; Value?: number }[] };
+		const values = new Map<string, number>();
+		for (const item of json.Parameters ?? []) {
+			if (typeof item.Id === "string" && typeof item.Value === "number") values.set(item.Id, item.Value);
+		}
+		this.exprCache.set(id, values);
+		return values;
 	}
 
 	/** 这块屏幕的像素比（200% 缩放是 2）。 */
@@ -377,5 +413,16 @@ export class Stage {
 			: 0;
 		this.mouth += (target - this.mouth) * Math.min(1, dt * 18);
 		this.put("ParamMouthOpenY", Math.max(0, Math.min(0.85, this.mouth)));
+
+		// 表情：这些开关参数（key*/Clothes*/Movement*）没人跟我们抢，淡过去就行
+		if (this.exprTargets.size > 0) {
+			const k = Math.min(1, dt * 6);
+			for (const [name, goal] of this.exprTargets) {
+				const current = this.exprValues.get(name) ?? 0;
+				const next = current + (goal - current) * k;
+				this.exprValues.set(name, next);
+				this.put(name, next);
+			}
+		}
 	}
 }
