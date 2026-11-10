@@ -10,7 +10,7 @@ import (
 // DWMWA_SYSTEMBACKDROP_TYPE and its DWMSBT_NONE, from dwmapi.h.
 const (
 	dwmwaSystemBackdropType = 38
-	dwmsbtNone             = 1
+	dwmsbtNone              = 1
 )
 
 // disableSystemBackdrop takes the window out of the system backdrop.

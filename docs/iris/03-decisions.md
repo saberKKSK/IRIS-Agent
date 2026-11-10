@@ -995,6 +995,22 @@ fork 的 `model.expression(id)` 能返回 true、`motionManager.expressionManage
 改成自己管：`setExpression(id)` 读模型里的 `settings.expressions` 找 `Name`，`fetch` 那张 exp3.json（缓存），把 `Parameters` 摊成 `参数名→值`；新的目标集合 = 这张表情的参数 **并上** 上一次碰过的参数（其余归 0），`drive()` 里按 `dt*6` 淡过去写 `put()`。这样表情天然互斥，随手能回去。
 
 实测（真机逐张）：`blush` 两颊泛红、`heart_eyes` 瞳孔变成爱心、`swirl_eyes` 空心圈眼、`distressed_eyes` 变成 >< 闭眼、`body_default` 回到正常蓝眼睛。
+
+### 修法十：窗口几何会被存坏，启动时要检查一次
+
+`StateKey: "iris-shell"` 让 mygo 把窗口位置与尺寸存进 `%APPDATA%\伊里斯 Dev\window-state.json`，**启动时覆盖 `WindowOptions`**（`internal/windows/window_state.go`：`windowStateDelay = 300ms` 捕获、关闭与退出时落盘）。
+
+坑在于捕获时机：最小化/`ShowWindow(SW_RESTORE)` 那一串操作中抓到的一次尺寸是 **520×480**（正好等于 `MinHeight`），于是写进 state；之后每次启动都按 480 覆盖 840，退出又把 480 存一遍——**自我延续，改代码也救不回来**（实测：重开后窗口 1040×960 物理 = 520×480 DIP，字幕条和输入条挤成一坨）。
+
+`drag_windows.go` 的 `ensureRestoredGeometry(hwnd)` 在 `WhenReady` 里、`disableSystemBackdrop` 之后跑一次：
+
+1. 高度 < `minRestoredHeight`（700 DIP）时按 `defaultWindowHeight`（840）重设；
+2. `moveByWindow(hwnd,0,0)` 把整窗夹回屏内（上次被拖着退出也能回来）；
+3. 竖着装得下（窗高 ≤ 工作区高）但底边压到任务栏下面时，整窗往上推到工作区里——输入条在窗子最底下，被切掉一截就点不到了（`SystemParametersInfoW(SPI_GETWORKAREA)` 取工作区）。
+
+非 Windows 是空实现。
+
+实测：① 带着那份坏的 state 重启，窗口立刻回到 1040×1680 物理（`after-guard.png` / `guard2.png`）；② 手动发 `WM_CLOSE` 正常退出后，state 被重写成 `width:520 height:840 pixelWidth:1040 pixelHeight:1680`（之前一直是 480，因为我是强杀进程，没走到保存那一步）；③ 恢复出来的 (2028,286) 物理让底边压到任务栏下，第 3 条把它推到 (2028,140)，整窗可见（`guard3.png`）。所以这个检查不能只做一次，每次启动都得跑。
 ### 一个坑（不是改法）：空输入区必须是 nil
 
 `SetInputRegion` 收到空列表时**不能传长度为 0 的非 nil 切片**——mygo 按 `inputRegion != nil` 判断 layered（`window.go:1321-1329`），`make([]Rectangle,0,…)` 会让窗口从第一帧起就是 layered。改成 `var out []mygo.Rectangle`（空即 nil），语义是「整窗吃鼠标」。
@@ -1016,6 +1032,7 @@ fork 的 `model.expression(id)` 能返回 true、`motionManager.expressionManage
 - **三层平台耦合**：`WS_EX_LAYERED` 与 DComp 内容本来互斥（`internal/windows/input_region.go:11-23` 的注释就是这么写的），我们能同时用是因为关掉了亚克力——这依赖一个**从未被 mygo 断言过的 DWM 行为**，Windows 大版本更新可能又变。真变了就得回到「要么整窗吃鼠标，要么整窗无内容」的老路上。
 - 关背板是 Windows-only 的 syscall，非 Windows 是空实现（macOS/Linux 下 MyGo 本来也不走这套）。
 - 拖窗是页面驱动的，所以**拖动期间窗口位置由我们的 JS 决定**：节流不当会抖。夹取只有「至少留 80 DIP 在屏内」，没做边缘吸附、也没按任务栏让位。
+- 窗口几何交给 mygo 的 `StateKey` 存盘，它会把一次坏尺寸**永久**固化下来（修法十描述的那个 520×480）；我们只在启动时兜底纠正，代价是「启动瞬间闪一下正确尺寸」，而且用户如果真想要 700 DIP 以下的矮窗口，这个兜底会把它拉回 840。
 - 注视靠轮询（10 Hz），指针移动她会**慢半拍**；够得着的半径是窗口长边的一半再 ×1.6，半径内线性软区（死区 0.18），超出饱和在 ±1，所以远距离时转角不再变。
 - 参数按 index 写是绕过 fork 的 bug，不是修 fork：**任何照抄官方文档用字符串 id 的代码，在这套依赖上都会无声失效**。以后接新模型先做一次「写 1 看画面对不对」的冒烟，别信读回值——它连读回值都是假的。
 - 已验证（真机）：Esc 最小化（点进输入框拿焦点后发 VK_ESCAPE → `IsIconic=True`，`SW_RESTORE` 回来几何不变）、最小化→恢复后**亚克力不会回来**（恢复后采样仍是 `(21,21,23)`）、点击穿透（壳下面顶一块计数窗：透明空隙点一下计数 0→1，人物身上点一下仍是 1）、注视跟随（见修法四）。

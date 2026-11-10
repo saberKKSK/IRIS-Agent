@@ -15,6 +15,7 @@ var (
 	procGetCursorPos     = user32.NewProc("GetCursorPos")
 	procGetDpiForWindow  = user32.NewProc("GetDpiForWindow")
 	procGetSystemMetrics = user32.NewProc("GetSystemMetrics")
+	procSystemParams     = user32.NewProc("SystemParametersInfoW")
 )
 
 type winRect struct{ left, top, right, bottom int32 }
@@ -30,6 +31,8 @@ const (
 	smYVirtualScreen  = 77
 	smCXVirtualScreen = 78
 	smCYVirtualScreen = 79
+
+	spiGetWorkArea = 0x0030
 
 	// keepVisible is how many DIPs of the window stay on screen when it is
 	// dragged towards an edge — enough to always have something to grab.
@@ -135,4 +138,64 @@ func softZone(v float64) float64 {
 
 func clampUnit(v float64) float64 {
 	return math.Max(-1, math.Min(1, v))
+}
+
+// 上一次退出时存下来的高度比这个还矮，就当那份状态坏了——最小化/还原的过程中
+// mygo 会把窗口按最小尺寸（520×480）记进 window-state.json，之后再启动就一直是
+// 那个尺寸，字幕条和输入条挤成一坨。
+const minRestoredHeight = 700
+
+// defaultWindowHeight 与 main.go 里 WindowOptions.Height 保持一致。
+const defaultWindowHeight = 840
+
+// workArea 是主屏的工作区（屏幕去掉任务栏），单位是物理像素。
+func workArea() (winRect, bool) {
+	var r winRect
+	if ok, _, _ := procSystemParams.Call(spiGetWorkArea, 0, uintptr(unsafe.Pointer(&r)), 0); ok == 0 {
+		return r, false
+	}
+	if r.right <= r.left || r.bottom <= r.top {
+		return r, false
+	}
+	return r, true
+}
+
+// ensureRestoredGeometry 在窗口建好之后跑一次：把「太矮」的恢复尺寸拉回默认高度，
+// 再顺手把整窗夹回屏幕内（上次是被拖着退出的也得回来）。
+func ensureRestoredGeometry(hwnd uintptr) {
+	if hwnd == 0 {
+		return
+	}
+	r, ok := windowRect(hwnd)
+	if !ok {
+		return
+	}
+	scale := windowScale(hwnd)
+	if float64(r.bottom-r.top)/scale < minRestoredHeight {
+		procSetWindowPos.Call(
+			hwnd,
+			0,
+			uintptr(r.left),
+			uintptr(r.top),
+			uintptr(r.right-r.left),
+			uintptr(int32(math.Round(defaultWindowHeight*scale))),
+			swpNoZOrder|swpNoActivate,
+		)
+	}
+	moveByWindow(hwnd, 0, 0)
+	// 竖着装得下就别让她半截出屏：输入条在窗子最底下，被切掉一截就点不到了。
+	last, ok := windowRect(hwnd)
+	wa, wok := workArea()
+	if !ok || !wok || last.bottom <= wa.bottom || (last.bottom-last.top) > (wa.bottom-wa.top) {
+		return
+	}
+	procSetWindowPos.Call(
+		hwnd,
+		0,
+		uintptr(last.left),
+		uintptr(int32(wa.bottom-(last.bottom-last.top))),
+		uintptr(last.right-last.left),
+		uintptr(last.bottom-last.top),
+		swpNoZOrder|swpNoActivate,
+	)
 }

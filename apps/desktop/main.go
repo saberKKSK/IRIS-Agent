@@ -236,8 +236,9 @@ func main() {
 		// Windows 11 24H2 起，没有重定向位图、靠 DirectComposition 画的窗口会被
 		// 系统默认套一层亚克力（桌面透过来是模糊+提亮的，不是原样），必须关掉。
 		disableSystemBackdrop(win.NativeHandle())
-		// 上次要是被拖到屏幕外退出的，开机先把她拽回来。
-		moveByWindow(win.NativeHandle(), 0, 0)
+		// 上次要是被拖到屏幕外退出的，开机先把她拽回来；存下来的尺寸要是坏成
+		// 最小高度，也在这里拉回默认值（见 drag_windows.go 的 ensureRestoredGeometry）。
+		ensureRestoredGeometry(win.NativeHandle())
 		page, err := win.NewWebView(mygo.WebViewOptions{URL: "/", Transparent: true, BackgroundColor: "#00000000"})
 		if err != nil {
 			log.Printf("[shell] 页面没建起来：%v", err)
