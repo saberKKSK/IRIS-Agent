@@ -205,3 +205,38 @@ describe("跑命令的 prompt 配合（ADR-0035）", () => {
 		assert.match(text, /C:\\IRIS Agent\\pi-mono/);
 	});
 });
+
+describe("接得下去 + 允许翻车（ADR-0038）", () => {
+	const base = {
+		persona,
+		state,
+		relationship: { closeness: 0.6, sharedMoments: 9, lastInteractionAt: 1 },
+		recent: [] as Episode[],
+		now: 10,
+	};
+
+	it("教她把话停在能接的地方，而不是每句都封口", () => {
+		const text = buildSystemPrompt(base);
+		assert.match(text, /留个口子/u);
+		assert.match(text, /同一根线接三轮/u);
+		assert.match(text, /留口子不是提问/u);
+	});
+
+	it("教她判断接的是哪一层：顺着就加码，敷衍就收", () => {
+		const text = buildSystemPrompt(base);
+		assert.match(text, /他不同意就顶一句/u);
+		assert.match(text, /敷衍/u);
+	});
+
+	it("允许认错，但不许拿它当编事实的借口", () => {
+		const text = buildSystemPrompt(base);
+		assert.match(text, /允许自己判断错/u);
+		assert.match(text, /没把握的事先说没把握，这两件事不冲突/u);
+		assert.match(text, /不是无懈可击/u);
+	});
+
+	it("有感知层时不许在他做事时插嘴当军师", () => {
+		const text = buildSystemPrompt({ ...base, canSee: true, perception: true });
+		assert.match(text, /别插话给建议/u);
+	});
+});

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>伊里斯</title>
+		<script src="/live2dcubismcore.min.js"></script>
+		<link rel="stylesheet" href="/src/style.css" />
+	</head>
+	<body>
+		<div id="grip" title="拖我"></div>
+		<div id="stage"></div>
+		<div id="hud">
+			<div id="caption" hidden>
+				<div id="topic"></div>
+				<div id="said"></div>
+			</div>
+			<div id="composer">
+				<input id="input" type="text" autocomplete="off" spellcheck="false" placeholder="跟她说点什么…" />
+				<button id="send" type="button">说</button>
+				<button id="quit" type="button" title="关掉她（Esc 只是收起来）">×</button>
+			</div>
+			<div id="status"></div>
+		</div>
+		<script type="module" src="/src/main.ts"></script>
+	</body>
+</html>

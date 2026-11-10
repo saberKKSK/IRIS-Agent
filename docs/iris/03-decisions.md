@@ -774,3 +774,182 @@ ADR-0036 给她装了眼睛，但是「叫一次看一次」：她说「你看�
 - 她说「看到了什么」永远可能是 3 分钟前的；注入那一行带「N 分钟前看的」，她也知道。
 - 三条件缺一个就不开口——宁可一路不说话，也不要有节拍器感。
 - 桌面 REPL 里 `--no-watch` / `--no-screen` 都能关掉；`/watch` 看她的眼睛现在什么状态。
+
+### 补记（2026-11-10 13:55，用户问「有做持久化是吧」→ 决策 5 后半句改了）
+
+决策 5 的后半句是错的：**主动开口那一轮要落归档，只是不写 cue。**
+
+当时怕的是「归档里冒出没人问过的话」，实际后果更糟——她这一句不写，他接下来那句是普通轮、照写，重启 `recentMessages` 接回历史就是一条 assistant 消息在回答一句不存在的话。持久化越靠谱这个洞越明显（`~/.iris/iris.db` 的 `messages` 表是 append-only，写错了删不掉）。
+
+- 改法：`runTurn()` 在 `internal === true` 时也调 `archiveTurn(null, text, at)`——只写她那句原文，不写 `（你自己开口：…）` 那条 cue（cue 是现场，不是对方说过的话）。`archiveTurn(input: string | null, …)` 用 `null` 表示「这一轮没有对方的话」。
+- 记忆那一侧照旧不写：`episode` 与 `this.turns` 仍只在 `internal === false` 时记——提炼不该把独白当成一轮对话。
+- 接回时把连着两条 assistant 并成一条（`restoreTranscript()` 里 `previous.content.push({ type: "text", text: "\n" + row.content })`）：库里两行记的是两件事，transcript 里连着两条 assistant 有些网关不认。
+- 两个新测试锁住：`主动开口：她那句照样落库，cue 不进库`、`接回历史：她主动那一句并进上一条 assistant`。`npm test` 232/232。
+
+## ADR-0038 · 接得下去 + 允许翻车：把「像 Neuro-sama」拆成两条能改 prompt 的事
+
+- 状态：已实施（`npm test` 230/230）
+- 日期：2026-11-10
+
+### 背景
+
+ADR-0037 让她的眼睛一直睁着，但用户连问两次：「这个视频你看了吗」（m06220）、「有学习到吗」（m06243）。材料三样：
+
+1. B 站《同样是AI虚拟形象，大肥鱼和Neuro-sama差在哪？》（古月，BV162xo6tEPq，759 s）：中文 AI 字幕全文 4755 字 + 抽 6 帧画面（108 / 215 / 326 / 431 / 543 / 649 s）。
+2. [How Neuro-sama Plays Games](https://www.youtube.com/watch?v=sxeqqR4Dcnw) 的整理与复述（nikechan.com 那篇）。
+3. AIRI（moeru-ai/airi）的 Minecraft 大脑 prompt（`brain-prompt.md`）。
+
+三条结论直接改了判断：
+
+- **Neuro 在 API 集成里根本不看画面**：游戏 `actions/register` 注册动作、`context` 推当前局面文本、她挑一个、`action/result` 回结果。她是有接口的那一侧，我们是只有像素的那一侧——**不是同一个问题**，所以「多久看一次屏幕」不能拿她当参照。
+- **她的强项是「接成阶梯」**：215 s 那一帧把咬人玩笑的三轮画成流程图——对方挑衅「你连我的皮都咬不动」→ 她加码「得卧推多少才不怕疼」→ 对方认输「你赢了」→ 她收尾。不是三条平行回复，是一条升级链。
+- **观众看的是她搞砸**：431 s 那帧标着她的背包计划（卖掉多余的指虎 / 捡起霰弹枪 / 先放下手里的鱼竿），下一句字幕是「接下来的画面里，Neuro又买了一根鱼竿」。
+
+### 决策（三条，只动 prompt）
+
+1. **话要停在能接的地方**（`persona.ts` 的「怎么说话」加四条）：说一句就留个口子（给判断、给具体的点、给一句挑衅，别把话说满）；他顺着接就往下推一层（加码 / 换角度 / 说过头），同一根线接三轮比开三个新话题强；**留口子不是提问**，不必每句都挂问号；他不同意就顶一句，他敷衍（「嗯」「哦」「行吧」）就收，别追着把话问完。
+2. **允许翻车**（同段加两条）：「允许自己判断错——猜偏了、话说满了、把事情想简单了，就认下那一句，别圆回来，也别急着把自己摆回『我能帮您』的位置」；「不用每句都正确、都有用、都好听，你被要求的是在场，不是无懈可击」。**同时写明「没把握的事先说没把握，这两件事不冲突」**——否则这条会被读成「可以编」的许可证，而 ADR-0019 / 0025 那套反编造规则是底线。
+3. **他做事的时候别当军师**（`perception` 段加一条）：「他正按自己的节奏做事的时候别插话给建议；他停下来、卡住了、或者明显在犹豫，再说」。
+
+### 没做的（记下来，别以为做了）
+
+- **采样与开口时机一个数没动**：20 s / 阈值 8 / 3 分钟补看 / 90 s 空闲 / 5 分钟冷却都照旧。场景切换（差 ≥40 后静稳才描述）、描述预算（≤12 次/小时）、失败退避（冷却 ×2）、开口评分，**都要改 `perception.ts` 的状态机，另起一条 ADR**。先改 prompt 的理由：一次真机就能看有没有用；状态机改错了，「她多久不开口」这种本来就稀疏的行为更难定位。
+- **「不落归档」那条待定**：`runTurn(..., internal)` 里主动开口那轮不写 archive / episode，但他回应的那句照写——重启后接回的历史里，他的回答会接在一句不存在的话后面。修法是把她的那句去 cue 后以 assistant 落归档。**没做**。
+- 「节目单」（一场里按时段切换形态）与「未了结的事」（open loops，Evil 生日一年后被接上的那种）只写进了认知，没有落码。
+
+### 验证
+
+- `npm test` **230/230**（新增 4 例：留口子 / 接哪一层 / 认错但不许编 / 做事时别插嘴）；`tsc -p packages/iris-core/tsconfig.check.json` exit 0；`biome check` 0 error。
+- **行为没量**：prompt 改动只能证明「规则写进去了」，证明不了「她照做」。要看真机的回复长度、问号密度、同一话题能不能连上三轮；同时盯负面指标——有没有把「允许判断错」用成编事实的借口。
+
+### 代价与边界
+
+- prompt 多了六行（约 200 字），每轮都带；改 prompt 会打断 prefix cache（既有问题，见 ADR-0022 那条）。
+- 「接三轮」和「别当解说员」是一对张力：接得下去要求她多推一层，别当解说员要求她少说。目前裁决是「说出口的话必须有下文，但不许每看一眼就播报」——靠人判断，没有自动化。
+- 这条只改说话方式，不改她看不看得到、能不能动手。
+
+## ADR-0039 · 桌面壳：Electron + Live2D，把她搬到一个透明窗口里
+
+- 状态：已实施，**壳已被 ADR-0040 换掉**（`apps/desktop` 现在是 MyGo + WebView2；页面、`stage.ts`、`server/daemon.mjs` 原样搬过去，Electron 那三个文件已删）。这一条下面的「选型」「渲染坑」「驱动」仍然成立。
+- 日期：2026-11-10
+
+### 背景
+
+到这一条为止，她只活在 REPL 里——要看她，得开一个终端。用户 m06376 问「用户端的问题怎么解决」（皮套、字幕、打字与语音输入），m06443 直接说「搭 Electron 壳」。
+
+选型（2026-11-10 15:17 用户贴出 `mygo.egoist.dev` 与 `gpui-kit.com` 追问，此段改写。原写「MyGo（Go + Live2D）」，那是把两个同名东西搞混了，实际上 MyGo 就是 Go 写的桌面框架）：
+
+① **MyGo**（egoist 的 Go 桌面框架，MIT，0.8.3）——**技术上能做，没选它是时间与不确定性**。它有两种窗口：Go 原生 UI（GPU 直画，无 webview）与**系统 webview**（Windows 用 WebView2）；后者里跑的就是我们现在这套 WebGL（Cubism 5 + Pixi 8）。窗口选项直接有桌宠要的东西：`Frameless` / `Transparent` / `AlwaysOnTop` / `SkipTaskbar` / `Panel`，文档「Click-through windows」一节第一句就是 *"A desktop pet is a frameless, transparent window always on top"*，并用 `SetInputRegion([]mygo.Rectangle{...})` 做**逐矩形**穿透（Electron 只有全开/全关，得靠 `setIgnoreMouseEvents` + 指针转发去凑）。体积也更好看：二进制 ~7 MB、原生 UI 常驻 ~44 MB、带 webview ~62 MB。没选的三条理由都是可测的：① 四个渲染坑是在 Pixi 8 + Chromium 上踩出来的，换 WebView2 得整组重测，尤其 clipping mask 那条至今没定性是 fork 的 bug 还是 WebGL2 的 bug；② 壳要重写成 Go（`main.mjs` / `preload.cjs` / 静态服务 / `--shot` 自测全作废），本机也没有 Go 工具链；③ Electron 当天出图，换 MyGo 至少一天重写加重测。
+② **GPUI Kit**（`gpui-kit.com`，Longbridge 的 Rust 组件库，Apache-2.0，0.9.1，75+ 组件）——**真不合适**：界面画在 GPUI 的 wgpu 上，没有 webview、没有 WebGL 上下文。`.moc3` 只能由 Cubism Core 解，而 Core 官方只发 web 版（WASM + WebGL 胶水）与 native 版（C++）；Rust 侧只有第三方 FFI 绑定 `live2d-cubism-core-sys`（0.1.0），拿到 Core 之后 drawable 渲染、裁剪遮罩、贴图混合、physics 仍要自己写——等于把已跑通的 700 行 TS 换成几千行 Rust 渲染管线。它是做「她旁边那套密集界面」（设置、日志、模型管理）的好东西，不是舞台。
+③ 还看过 `dsh-live2d-mygo`（名字取自动画 MyGO!!!!!，跟上面两个都无关）：DSH Web GUI 的页内桌宠插件，Cubism 2.1 + PIXI 6.5.2，读不了大肥鱼的 Cubism 5 `.moc3`，舞台也只在 DSH 网页的右下角。
+
+共同点：**壳是消耗品**——daemon 走 HTTP，渲染层是唯一被绑定的部分。换成 MyGo 只需要重写壳，内核一行不改。
+
+模型是《DeepSeek-chan（大肥鱼）》（原画 神宫凉子、建模 霓虹猫_NeonNeko）。**许可禁止再分发**，所以模型在仓库外：`C:\IRIS Agent\assets\live2d\`（`assets/.gitignore` 排除 `live2d/**`），dev 由 vite 中间件挂静态，生产由 Electron 主进程起一个只服务 `/live2d/*` 的本地 http。
+
+### 结构
+
+| 文件 | 干什么 |
+|---|---|
+| `apps/desktop/index.html` / `src/style.css` | 透明底 + 字幕条 + 输入条；`html:not(.shell)` 才铺深色渐变（浏览器调试用） |
+| `src/stage.ts` | Pixi 8 + `@naari3/pixi-live2d-display` 1.2.5；加载 model3、排版、程序化驱动 |
+| `src/bridge.ts` | SSE `/events` 收流 + `POST /say`、`/speakup` 发话（不用 WebSocket：零依赖） |
+| `src/ui.ts` | 字幕（他说/她说）、输入、`首字 x s · 整轮 y s · effort` |
+| `server/daemon.mjs` | 常驻的「脑子」：`createSession(...)` + 四个端点（`/health` `/events` `/say` `/speakup`），直接 import `.ts`（Node 24 类型剥离） |
+| `main.go` | 壳（现为 MyGo，ADR-0040）：透明无边框置顶窗、逐矩形穿透 `SetInputRegion`、`live2d://` 自定义协议、daemon 没跑就拉起、拖窗 `MoveBy` |
+| `backdrop_windows.go` / `backdrop_other.go` | 关掉 Windows 的系统亚克力背板（ADR-0040 的根因修复），非 Windows 是空实现 |
+| `src/mygo.ts` | `mygo generate` 从 Go 的 `Shell` 生成，页面调 Go 只走这一层 |
+
+### 四条渲染坑（每条都实测过）
+
+1. **不给 renderer，它每帧直接 return**。fork 的 `_onRenderCallback()` 第一句读 `this.renderer`，没有就退到 `globalThis.app`，两样都没有就静默返回——模型在、纹理在、GL 无报错，画面一个像素都没有。修法：`model.setRenderer(app.renderer)`（bundle 里没有任何调用点）。
+2. **Cubism 画完把 `gl.clearColor` 留在 (1,1,1,1)**，Pixi 下一帧照着白清，画布变成一整块不透明白底。修法：包一层 `internalModel.draw`，画完还原成 `(0,0,0,0)`。
+3. **贴图版 clipping mask 在 Pixi v8 下失效**：嘴部 drawable 不被裁剪，整块红嘴和口内糊在脸上（看起来像吐舌头）。换成高精度遮罩（逐 drawable 裁剪矩阵）就正常：`renderer._useHighPrecisionMask = true`（fork 没暴露 setter，只能写私有字段）。残留问题是网格缝上偶有一条 1 px 的浅色虚线，只在透明底上看得见。
+4. **`resolution` 必须是 1**：fork 用 `renderer.screen`（CSS 尺寸）设 `gl.viewport`，canvas 后备缓冲一旦是 2 倍，人就画成一半大、挤在左下角。代价是 200% 缩放下略糊。
+
+另外排版要跟着画布尺寸走：`ResizeObserver` + 每帧比一次 `app.screen`（Electron 窗口 `show()` 之前量到的是 `minWidth`，只信 `window.resize` 会一直用 340 宽排版）。
+
+### 驱动（没有动作文件也能动）
+
+模型自带的 `IDLE.motion3.json` 只动汗滴/眼泪/星星特效，6 个手势文件是道具开关，唯一全身动作是 `脱捕`（13 s）。所以四层全部程序化，写在 `beforeModelUpdate`（压在 motion/physics 之后）：呼吸（两个正弦 3.9 s / 6.3 s）、眨眼（2.4–6.6 s 随机、说话时不眨）、视线（`model.focus`，指针指哪看哪）、说话（头微侧 + `ParamMouthOpenY` 假包络，等 TTS 接进来换真 RMS）。
+
+### 验证
+
+- 浏览器 1280×800 与 Electron 520×840 两边都出图，脸对得上官方图标 `大肥鱼.png`。
+- 端到端：`POST /say {"text":"你在干嘛呢"}` → 202，3.4 s 后字幕条出现「在待着。下午两点五十六，你这个点不该忙吗」（`首字 3.3 s · 整轮 3.4 s · high`）。
+- 透明是真的：`capturePage()` 的 alpha 通道 YAVG=19/255、YMAX=255（背景透明，只有人和 UI 不透明）。
+- 生产路径也通：`npm run build` 后 `node scripts/app.mjs --shot=…` 与 dev 模式排版一致。
+
+### 代价与边界
+
+- 没有语音（TTS / ASR）、没有 viseme，口型是假包络；字幕整句出现，还没按句切。
+- 模型 592 MB VRAM（5 张纹理，一张 8192²），核显实测一次性解码 657 ms。
+- 舞台提示（（翻过一页书））还没接到表情/动作上——现在被 `stripStageDirections()` 直接扔掉。
+- daemon 只给了 `createSession` 不带工具：壳现在能聊，但还不能搜网页、不能看屏幕。
+- **什么时候该换成 MyGo**（当时写下的判据）：常驻内存 > 400 MB、冷启动 > 3 s、需要逐矩形穿透、或要做多屏各自一个窗口。**已经换了**（2026-11-10，用户 m07133 直接定 MyGo），换法与代价见 ADR-0040。
+## ADR-0040 · 壳换成 MyGo：整窗透明卡在 Windows 的系统亚克力背板上，拖窗要页面自己发增量
+
+- 状态：已实施（窗口透到桌面、逐矩形穿透、页面输入、拖窗、端到端对话都实测过；`go build` 与 `tsc --noEmit` exit 0）
+- 日期：2026-11-10
+
+### 背景
+
+用户 m07133 定调「完全使用 MyGo 做桌面壳」（不再用 Electron）。换上后窗口**整块不透明**：先是纯黑 `#000`，改成 native UI（`WindowOptions.Content` + `Transparent`）后变成均匀的 `#d3d3d3` 浅灰，桌面上一个像素都透不过来。这条 ADR 记的是排查结论和三个必须记住的改法。
+
+### 根因：Windows 自己给窗口套了亚克力背板
+
+`DwmGetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE=38)` 在活窗口上返回 **3 = DWMSBT_ACRYLIC**。这个属性我们从没设过（mygo 全模块只有 `internal/windows/window.go:1419 SetVibrancy` 和 `menudraw.go:1222` 会写它）——**Windows 11 24H2 起，一个没有重定向位图、靠 DirectComposition 画内容的窗口，系统默认给它套亚克力**。亚克力不是透明：它把桌面模糊后抬亮再合成上来，所以看到的是「磨砂玻璃 + 整体偏亮约 +70」。
+
+三种表现是同一件事：
+
+| 窗口状态 | 看到的东西 | 为什么 |
+|---|---|---|
+| 带 `WS_EX_LAYERED`（设了输入区） | 均匀 `#d3d3d3` | 亚克力在 layered 窗口上合成不了，只剩一层平灰 |
+| 不带 layered（没输入区） | 磨砂玻璃、桌面能看见但被模糊提亮 | 亚克力正常合成 |
+| `MYGO_GPU=0` 软件渲染 | 淡灰薄膜，桌面透出来被抬亮约 +70 | 同上，换了个渲染后端 |
+
+**决定性实验**（`.artifacts/iso.py`：对活窗口直接改属性再逐点采样）：backdrop=1(NONE) → 窗内 `(21,21,23)`/`(44,44,46)`，与窗外桌面完全一致；backdrop=3(ACRYLIC) → `(142,142,144)` 一片磨砂；backdrop=2(MICA) → `(245,243,239)` 更亮；改回 1 → 又清晰。
+
+同一个结论还有两条旁证：
+
+- **mygo 自己的 e2e 用例在这台机器上也失败**：`MYGO_E2E=1 go test ./internal/e2e -run TestContentWindowTransparent` → `e2e_test.go:4229: the window behind, beside the pane never happened (waited 1m0s)`。它断言「红块后面能看到蓝窗」，读不到；而 `noRedirect` 断言是通过的、`canCompose()` 也没跳过。
+- **本机 OS 的逐像素 alpha 是好的**：经典 `WS_EX_LAYERED` + `UpdateLayeredWindow` 探针（`.artifacts/layered_probe3.py`，420×300，左红 / 中 50% 蓝 / 右全透明）抓屏采样得到 `(255,0,0)` / `(10,10,139)`（= 0.5×255 + 0.5×23，合成正确）/ 纯桌面。所以问题不在 layered、也不在截图通道。
+
+顺带记两个排查时踩的坑：探针「看不见」是因为**进程没做 DPI 感知**（200% 缩放下逻辑坐标被放大到屏外）和 **wndproc 回调没写 `argtypes`/`restype`**（指针截断直接崩）；`ddagrab` 只有 output_idx 0 且首帧常是黑的，抓屏一律用 `-f gdigrab -i desktop`。
+
+### 修法一：显式关掉背板（`backdrop_windows.go`）
+
+`DwmSetWindowAttribute(hwnd, 38, &dwmsbtNone=1, 4)` + `DwmExtendFrameIntoClientArea`（全 0 margins）。`main.go` 在 `NewWindow` 之后和 `NewWebView` 之后各调一次（建 web view 会重新初始化 DWM 那一层，只调一次在某些时序下会被覆盖）。非 Windows 是空实现（`backdrop_other.go`）。**恢复效果实测**：窗内 `(21,21,23)` / `(44,44,46)`，与窗外同层 `(19,19,21)` / `(21,21,23)` 一致，大肥鱼和字幕条照常。
+
+### 修法二：`#stage` 必须 `pointer-events: none`
+
+拖窗走了半天不通，先在页面上把 pointerdown 的 target 打到状态行才看清：按下去 target 先是**空 id**（Pixi 的 canvas），canvas 让开以后是 `stage`——`#stage` 和 canvas 都 `inset: 0` 盖满窗口，按哪儿都先撞上它们，`--app-region: drag` 的 grip 永远收不到按下。
+
+`apps/desktop/src/style.css` 里给 `#stage`（连带画布）加 `pointer-events: none`，注视改走 `window` 的 `pointermove`（本来就是这个路子）。`#grip` / `#hud` 与 `#stage` 在 `index.html` 里是**兄弟节点**，所以字幕条和输入框不受影响。
+
+### 修法三：拖窗改成页面发增量（`Shell.MoveBy`）
+
+mygo 的原路是 `internal/windows/window.go:1509 StartDrag()` = `ReleaseCapture()` + `SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)`，由注入的 bridge 在按下 `--app-region: drag` 元素时触发。**实测纹丝不动**——判断是 WebView2 子窗口握着鼠标捕获，标题栏移动循环要的位移收不到（没逐帧证实，但换成页面驱动后立刻可用）。
+
+Go 侧：`func (s *Shell) MoveBy(dx, dy float64)`，内部 `mygo.RunOnMain` 里取 `win.Position()` 再 `win.SetPosition(x+int(math.Round(dx)), …)`。页面侧（`src/main.ts`）：捕获阶段 `pointerdown` 从 target 往上找 `--app-region`（`drag` 命中、`no-drag` 收手），记起点并 `setPointerCapture`；`pointermove` 算增量调 `GoShell.moveBy`；`pointerup`/`pointercancel` 清空。改完要 `npm run generate` 重新生成 `src/mygo.ts`。实测合成拖动 12 步 ×(16,10) 物理像素 → 窗口正好移动 `(192,120)` 物理 = `(96,60)` DIP。
+
+### 一个坑（不是改法）：空输入区必须是 nil
+
+`SetInputRegion` 收到空列表时**不能传长度为 0 的非 nil 切片**——mygo 按 `inputRegion != nil` 判断 layered（`window.go:1321-1329`），`make([]Rectangle,0,…)` 会让窗口从第一帧起就是 layered。改成 `var out []mygo.Rectangle`（空即 nil），语义是「整窗吃鼠标」。
+
+### 验证（都是真机数据）
+
+- **透明**：抓屏采样窗内 `(1050,100)`/`(1300,400)`/`(1900,1500)` = `(21,21,23)`/`(21,21,23)`/`(44,44,46)`，窗外同层 `(19,19,21)`/`(21,21,23)` ⇒ 桌面原样透出，无灰无膜。此时窗口**仍是 layered**（页面发过输入区）且 `backdrop=1` —— 证明关掉亚克力后 layered + DComp 内容完全可用。
+- **逐矩形穿透**：页面上报输入区（DIP）`body 59,0 388x794` / `grip 168,0 172x14` / `composer 12,753 483x48`（`src/main.ts:33-38 reportRegion()`，boot 里每 500 ms 重报）；轮询 `WS_EX_TRANSPARENT` 判读：grip / 身子 / 输入条上 through=False，左侧空隙 (20,115) through=True。mygo 侧是 `internal/windows/input_region.go:96-112 followCursor()` 的 10 ms 定时器按光标切样式。
+- **页面输入**：点输入框 + 逐字 `keybd_event` 打出 `test23`，截图里输入框确实显示出来了。
+- **端到端对话**：`POST /say {"text":"在吗？刚才窗子终于是透的了"}` → 202，约 8 s 后字幕条出现「嗯，透的」。口型由 `stage.ts:308-312` 的 `talking` 包络写 `ParamMouthOpenY` 驱动（`main.ts:48/54/68` 开关）；上半身区域逐帧灰度差在字幕出现那两帧是 10.9 / 13.2，之后回落到 4.6（只剩呼吸）——**没有逐帧核对口型**。
+- `cd apps/desktop; go build -mod=mod ./...` exit 0；`bunx tsc --noEmit` exit 0。
+
+### 代价与边界
+
+- **三层平台耦合**：`WS_EX_LAYERED` 与 DComp 内容本来互斥（`internal/windows/input_region.go:11-23` 的注释就是这么写的），我们能同时用是因为关掉了亚克力——这依赖一个**从未被 mygo 断言过的 DWM 行为**，Windows 大版本更新可能又变。真变了就得回到「要么整窗吃鼠标，要么整窗无内容」的老路上。
+- 关背板是 Windows-only 的 syscall，非 Windows 是空实现（macOS/Linux 下 MyGo 本来也不走这套）。
+- 拖窗是页面驱动的，所以**拖动期间窗口位置由我们的 JS 决定**：节流不当会抖，指针离开窗口（`setPointerCapture` 通常还管得住）时可能丢增量。目前没做边缘吸附/多屏夹取。
+- 注视（gaze）没做像素级核对；Esc 最小化、点穿到背后窗口的实测也没做（区域判定只验到了 exstyle）。
+- 排查留下的一次性脚本在 `C:\IRIS Agent\.artifacts\`（`iso.py` / `layered_probe3.py` / `enumwin.ps1` / 各种 crop 图），没进仓库。
+

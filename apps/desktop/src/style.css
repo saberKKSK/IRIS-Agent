@@ -1,0 +1,172 @@
+:root {
+	--ink: #f4f5f8;
+	--dim: rgba(244, 245, 248, 0.5);
+	--pink: #ff6ac1;
+	--panel: rgba(16, 17, 23, 0.62);
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	height: 100%;
+	overflow: hidden;
+	background: transparent;
+	font-family: "IosevkaTerm NFM", "Sarasa Term SC", "Microsoft YaHei UI", system-ui, sans-serif;
+	color: var(--ink);
+	user-select: none;
+}
+
+/* 用浏览器直接开 dev server 调版式时垫一层底；在 MyGo 窗口里是全透明的 */
+html.browser body {
+	background: radial-gradient(120% 80% at 50% 100%, #1c1f2b 0%, #0c0d12 62%);
+}
+
+/* 整块舞台不接指针：它盖满窗口，接了就没人按得到下面那条 grip 和字幕条，
+   拖窗失效。注视走 window 的 pointermove，跟画布无关。 */
+#stage {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+}
+
+#stage canvas {
+	display: block;
+}
+
+/* 顶部那条极细的拖手：--app-region 只是个标记，真正拖动由 main.ts 读它、
+   把指针增量发给 Go 的 Shell.MoveBy（见 ADR-0040：MyGo 的 StartDrag 在
+   WebView2 上收不到位移） */
+#grip {
+	position: absolute;
+	top: 0;
+	left: 50%;
+	transform: translateX(-50%);
+	width: 168px;
+	height: 10px;
+	border-radius: 0 0 999px 999px;
+	background: rgba(255, 255, 255, 0.07);
+	cursor: grab;
+	--app-region: drag;
+}
+
+#grip:hover {
+	background: rgba(255, 255, 255, 0.16);
+}
+
+#hud {
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	padding: 14px 16px 14px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+#caption {
+	pointer-events: auto;
+	background: var(--panel);
+	backdrop-filter: blur(9px);
+	border: 1px solid rgba(255, 255, 255, 0.09);
+	border-radius: 14px;
+	padding: 10px 13px;
+	max-height: 34vh;
+	overflow: hidden;
+	--app-region: drag;
+}
+
+#topic {
+	font-size: 11px;
+	letter-spacing: 0.08em;
+	color: var(--dim);
+	margin-bottom: 4px;
+}
+
+#said {
+	font-size: 15px;
+	line-height: 1.62;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+#said.thinking {
+	color: var(--dim);
+	font-style: italic;
+}
+
+#composer {
+	display: flex;
+	gap: 8px;
+	pointer-events: auto;
+}
+
+#input {
+	flex: 1;
+	min-width: 0;
+	background: var(--panel);
+	backdrop-filter: blur(9px);
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	border-radius: 999px;
+	padding: 10px 15px;
+	color: var(--ink);
+	font: inherit;
+	font-size: 14px;
+	outline: none;
+	--app-region: no-drag;
+}
+
+#input::placeholder {
+	color: rgba(244, 245, 248, 0.32);
+}
+
+#input:focus {
+	border-color: rgba(255, 106, 193, 0.55);
+}
+
+#send {
+	background: rgba(255, 106, 193, 0.16);
+	border: 1px solid rgba(255, 106, 193, 0.42);
+	color: var(--pink);
+	border-radius: 999px;
+	padding: 0 16px;
+	font: inherit;
+	font-size: 13px;
+	cursor: pointer;
+	--app-region: no-drag;
+}
+
+#send:hover {
+	background: rgba(255, 106, 193, 0.26);
+}
+
+#quit {
+	width: 34px;
+	background: rgba(255, 255, 255, 0.06);
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	color: var(--dim);
+	border-radius: 999px;
+	font: inherit;
+	font-size: 15px;
+	line-height: 1;
+	cursor: pointer;
+	--app-region: no-drag;
+}
+
+#quit:hover {
+	background: rgba(255, 80, 110, 0.24);
+	border-color: rgba(255, 80, 110, 0.5);
+	color: #ffdde3;
+}
+
+#status {
+	font-size: 11px;
+	color: var(--dim);
+	letter-spacing: 0.04em;
+	min-height: 13px;
+	padding-left: 4px;
+}

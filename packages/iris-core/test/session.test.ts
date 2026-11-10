@@ -629,6 +629,48 @@ test("主动开口：没人问也能说一句，那句 cue 留在历史里（ADR
 	assert.equal(textOf(session.messages.at(-4) as AgentMessage), "我先跑个测试");
 });
 
+test("主动开口：她那句照样落库，cue 不进库（ADR-0037 补记）", async () => {
+	const archive = new SqliteArchive({ path: ":memory:" });
+	const session = createSession({
+		persona: PERSONA,
+		streamFn: scripted(["我在听", "你在跑测试，报错那行我看见了"]),
+		archive,
+		compact: false,
+		resumeMessages: 0,
+	});
+	await session.say("我先跑个测试");
+	const turn = await session.speakUp();
+	assert.equal(archive.stats().messages, 3, "他一句两行 + 她主动那一句");
+	const rows = archive.recentMessages(10, 0);
+	assert.equal(rows.at(-1)?.role, "assistant");
+	assert.equal(rows.at(-1)?.content, turn.text);
+	assert.ok(
+		rows.every((row) => !row.content.includes("你自己开口")),
+		"cue 是现场，不该进库",
+	);
+});
+
+test("接回历史：她主动那一句并进上一条 assistant，不出现连着两条", async () => {
+	const archive = new SqliteArchive({ path: ":memory:" });
+	await archive.ingest({
+		sessionId: "iris",
+		turns: [
+			{ role: "user", content: "我先跑个测试", at: 0 },
+			{ role: "assistant", content: "我在听", at: 1000 },
+			{ role: "assistant", content: "报错那行我看见了", at: 2000 },
+			{ role: "user", content: "嗯", at: 3000 },
+		],
+	});
+	const session = createSession({ persona: PERSONA, streamFn: scripted(["嗯。"]), archive });
+	const messages = session.messages;
+	assert.equal(messages.filter((message) => message.role === "assistant").length, 1, "两条 assistant 要并成一条");
+	const merged = textOf(messages.find((message) => message.role === "assistant") as AgentMessage);
+	assert.match(merged, /我在听/u);
+	assert.match(merged, /报错那行我看见了/u);
+	assert.equal(messages.at(-1)?.role, "user");
+	assert.equal(session.restoredMessages, 3);
+});
+
 test("感知层：每轮请求末尾带上他在干什么，session 自己的历史不留（ADR-0037）", async () => {
 	const seen: AgentMessage[][] = [];
 	const session = createSession({

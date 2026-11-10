@@ -12,9 +12,9 @@ IRIS（伊里斯）是建立在 pi 之上的**娱乐型 / 陪伴型智能体**�
 | [04-consent.md](04-consent.md) | 授权、披露与红线 |
 | [05-memory.md](05-memory.md) | 记忆分层与检索策略 |
 
-> 记忆生命周期的**实现口径**看 [03-decisions.md](03-decisions.md) 的 ADR-0014（原文永久归档 + 三档 + 时间轴）、ADR-0015（先不建向量库，FTS5 单字+二元组 + 实体加权）、ADR-0016（不设人工确认，写入即生效）；**语料风格**看 ADR-0017；**联网**看 ADR-0024，**「她说搜过了就得真搜」**看 ADR-0025，**只读文件三件**看 ADR-0026 / ADR-0027，**点赞与评论不设人工闸门**看 ADR-0028，**私信只回名单上的人**看 ADR-0029 / ADR-0030，**思考档位自动选**看 ADR-0031，**权限一次点头管到底（她可以自己开口要）**看 ADR-0033，**写权限与读权限分两本账**看 ADR-0034，**自己跑命令**看 ADR-0035，**看屏幕**看 ADR-0036，**一直看着屏幕并自己开口**看 ADR-0037。
+> 记忆生命周期的**实现口径**看 [03-decisions.md](03-decisions.md) 的 ADR-0014（原文永久归档 + 三档 + 时间轴）、ADR-0015（先不建向量库，FTS5 单字+二元组 + 实体加权）、ADR-0016（不设人工确认，写入即生效）；**语料风格**看 ADR-0017；**联网**看 ADR-0024，**「她说搜过了就得真搜」**看 ADR-0025，**只读文件三件**看 ADR-0026 / ADR-0027，**点赞与评论不设人工闸门**看 ADR-0028，**私信只回名单上的人**看 ADR-0029 / ADR-0030，**思考档位自动选**看 ADR-0031，**权限一次点头管到底（她可以自己开口要）**看 ADR-0033，**写权限与读权限分两本账**看 ADR-0034，**自己跑命令**看 ADR-0035，**看屏幕**看 ADR-0036，**一直看着屏幕并自己开口**看 ADR-0037，**接得下去与允许翻车**看 ADR-0038，**桌面壳（Electron + Live2D）**看 ADR-0039，**壳换成 MyGo 与整窗透明的坑**看 ADR-0040。
 
-代码起点：`packages/iris-core`（已可运行，226 个测试）。模块：`types`（词汇表）/ `persona`（四层人格→prompt）/ `memory`（内存版 Episode 表）/ `archive`（SQLite 原文归档 + 三档生命周期 + 无向量检索）/ `distill`（模型分档 + 提炼成短事实）/ `style`（语料导入 → 说话方式档案）/ `model`（Magpie，主对话 + 视觉两个 endpoint 描述）/ `vision`（看图 → 转述）/ `context`（上下文满了压成记忆）/ `web`（联网：搜索与抓页）/ `files`（只读文件三件 + 要权限 + 授权闸门）/ `write`（写五件：写 / 追加 / 建目录 / 改名搬家 / 要写权限）/ `shell`（命令执行一件：只读的直接跑，其余问他，地方跟着写权限走）/ `screen`（看屏幕：抓一张缩略图交给视觉模型转述）/ `perception`（一直看着屏幕：20 秒瞥一眼，变了才重新描述，给他空闲时她自己开口）/ `lines`（输入队列）/ `douyin`（刷抖音：推荐流 / 评论 / 点爱心 / 发一条 / 私信只回名单上的人）/ `browser`（借插件那台无头 Chrome 在页面里发请求）/ `effort`（这一轮该想多深：规则优先，分类模型可选）/ `complete`（一次纯文本补全，几个模块共用）/ `session`（pi `Agent` 会话层）。
+代码起点：`packages/iris-core`（已可运行，232 个测试）。模块：`types`（词汇表）/ `persona`（四层人格→prompt）/ `memory`（内存版 Episode 表）/ `archive`（SQLite 原文归档 + 三档生命周期 + 无向量检索）/ `distill`（模型分档 + 提炼成短事实）/ `style`（语料导入 → 说话方式档案）/ `model`（Magpie，主对话 + 视觉两个 endpoint 描述）/ `vision`（看图 → 转述）/ `context`（上下文满了压成记忆）/ `web`（联网：搜索与抓页）/ `files`（只读文件三件 + 要权限 + 授权闸门）/ `write`（写五件：写 / 追加 / 建目录 / 改名搬家 / 要写权限）/ `shell`（命令执行一件：只读的直接跑，其余问他，地方跟着写权限走）/ `screen`（看屏幕：抓一张缩略图交给视觉模型转述）/ `perception`（一直看着屏幕：20 秒瞥一眼，变了才重新描述，给他空闲时她自己开口）/ `lines`（输入队列）/ `douyin`（刷抖音：推荐流 / 评论 / 点爱心 / 发一条 / 私信只回名单上的人）/ `browser`（借插件那台无头 Chrome 在页面里发请求）/ `effort`（这一轮该想多深：规则优先，分类模型可选）/ `complete`（一次纯文本补全，几个模块共用）/ `session`（pi `Agent` 会话层）。
 
 ## 跑起来
 
@@ -31,7 +31,7 @@ npm run build
 
 ```bash
 cd packages/iris-core
-node --test test/*.test.ts                    # 226/226
+node --test test/*.test.ts                    # 232/232
 node examples/archive-day.ts                  # 离线：三档记忆 + 自动升级 + 无向量检索 + 过期
 node examples/live-turn.ts "今天下班有点累"      # 真模型：走本机 Magpie
 node examples/remember.ts "记住这个：我对花生过敏"  # 真模型：写入 ~/.iris/iris.db
@@ -49,6 +49,20 @@ node examples/voice-bench.ts before            # 人味回归基线：12 条输�
 npm run look -- 截图.png                       # 看图：先转述，再让她回一句
 npm run look -- 截图.png --note-only           # 只看转述，不让她说话
 ```
+
+桌面壳（`apps/desktop`，ADR-0039 → 壳已换成 MyGo，见 ADR-0040）：皮套是《DeepSeek-chan（大肥鱼）》，**许可禁止再分发，模型不进 git**——放在 `C:\IRIS Agent\assets\live2d\大肥鱼\DeepSeek`，由 Go 侧注册的 `live2d://` 自定义协议直接喂给 WebView2（Windows 上是 `http://live2d.localhost/…`），找不到时退回 daemon 的 `/live2d`。窗口、穿透、拖窗、daemon 拉起都在 Go 里；页面还是那套 Pixi 8 + Live2D。
+
+```bash
+cd pi-mono/apps/desktop
+npm install          # pixi 8 + @naari3/pixi-live2d-display 1.2.5 + mygo-cli / mygo-runtime
+npm run daemon       # 脑子：http://127.0.0.1:5274（/health /events /say /speakup）；mygo dev 也会自己拉起来
+npm run dev          # 透明置顶窗（mygo dev：Go 热重建 + vite），日志在 %TEMP%\iris-shell.log
+npm run dev:web      # 只开页面：vite，http://127.0.0.1:5273（浏览器里也能开，会铺深色底）
+npm run build        # mygo build：产出 iris-desktop.exe
+npm run generate     # 改了 Shell 的 Go 方法后重新生成 src/mygo.ts
+```
+
+渲染上的硬约束（改之前先看 ADR-0039）：`model.setRenderer(app.renderer)` 不能省、`resolution` 必须是 1、`_useHighPrecisionMask = true` 才能把嘴裁对；`internalModel.draw` 外面那层还原 `clearColor` 也不能删，否则整块白底。窗口侧的硬约束在 ADR-0040：必须关掉 DWM 的亚克力背板（否则整窗磨砂提亮）、`#stage` 必须 `pointer-events: none`（否则按不到 grip）、拖窗由页面发增量给 `Shell.MoveBy`（MyGo 的 `StartDrag` 在 WebView2 上收不到位移）。
 
 记忆：`archive.ts` 把每轮原文 append-only 落进 SQLite（脱敏后、触发器禁改删），会话结束时按规则分三档——普通档 30 天 TTL、中等档直接 `active` 且永不过期、重要档 `locked`（AI 只读）；**没有人工确认环节**，写入即生效（ADR-0016），要改就用 `amend` / `promote` / `drop` 直接改；检索用 FTS5 单字+二元组 + bm25 + 分层/时间加权，实测 0.2–0.8 ms，没有向量库。库默认在 `~/.iris/iris.db`（`IRIS_ARCHIVE` 可覆盖）；会话开场用 `SqliteArchive.essential()` 把重要档与最近确认的记忆注入 system prompt。归档时的分档与提炼可以换成模型（`distill.ts` 的 `llmMemory()`，`temperature 0` + 20 s 超时，失败自动回落规则）：模型版写进库的是短事实 + 原文子串作证据，规则版是整段流水。
 

@@ -628,6 +628,7 @@ export class IrisSession {
 	 * `Cannot continue from message role: assistant`（实测 0 ms），所以主动说话
 	 * 只能伪造一条 user 消息。这条 cue 留在 transcript 里（刻意的：下次她看见自己
 	 * 说过的话，得知道当时是因为什么说的），但不进原文归档——那不是对方说的话。
+	 * 她那句回复本身照常归档，只是没有配对的问题（ADR-0037 补记）。
 	 */
 	async speakUp(hint = "", hooks: IrisSessionHooks = {}): Promise<IrisTurn> {
 		const tail =
@@ -755,8 +756,9 @@ export class IrisSession {
 			turn.episode = episode;
 		}
 
-		// 主动开口不落归档：那不是对方说的话，接回历史时也对不上（ADR-0037）。
-		if (!internal) this.archiveTurn(input, text, at);
+		// 主动开口也落归档，只是不写 cue（ADR-0037 补记）：她这一句不记账，他接下来
+		// 那句照写，重启接回历史就成了「他在回答一句不存在的话」。
+		this.archiveTurn(internal ? null : input, text, at);
 		this.lastReply = text;
 		// 下一轮的「信封」：上一句说了什么、调了几次工具、活干完没有。
 		this.lastInput = input;
@@ -813,13 +815,21 @@ export class IrisSession {
 		this.agent.reset();
 	}
 
-	/** 原文落库：不脱敏的事交给 archive，这里只负责把这一轮原样交过去。 */
-	private archiveTurn(input: string, reply: string, at: number): void {
+	/**
+	 * 原文落库：不脱敏的事交给 archive，这里只负责把这一轮原样交过去。
+	 *
+	 * `input` 为 null 表示这一轮没有对方的话（她自己开口）——只写她那句，
+	 * 不写 cue：cue 是给模型看的现场，不是对方说过的内容（ADR-0037 补记）。
+	 */
+	private archiveTurn(input: string | null, reply: string, at: number): void {
 		if (this.archive === null || this.conversationId === null) return;
-		const turns: RawTurn[] = [
-			{ role: "user", content: input, at },
-			{ role: "assistant", content: reply, at },
-		];
+		const turns: RawTurn[] =
+			input === null
+				? [{ role: "assistant", content: reply, at }]
+				: [
+						{ role: "user", content: input, at },
+						{ role: "assistant", content: reply, at },
+					];
 		this.archive.appendTurns(this.conversationId, turns);
 	}
 
@@ -885,6 +895,13 @@ export class IrisSession {
 		const rows = this.trimHistory(this.archive.recentMessages(this.resumeMessages, since));
 		const restored: AgentMessage[] = [];
 		for (const row of rows) {
+			const previous = restored.at(-1);
+			// 她主动开口那句在库里排在自己上一句回复后面（中间没有对方的话），
+			// 接回时并成一条 assistant——连着的两条有些网关不认。
+			if (row.role === "assistant" && previous !== undefined && previous.role === "assistant") {
+				previous.content.push({ type: "text", text: `\n${row.content}` });
+				continue;
+			}
 			if (row.role === "user") {
 				restored.push({ role: "user", content: [{ type: "text", text: row.content }], timestamp: row.at });
 			} else if (row.role === "assistant") {
