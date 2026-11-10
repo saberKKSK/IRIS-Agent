@@ -96,11 +96,16 @@ async function boot(): Promise<void> {
 	ui.setStatus("模型好了");
 }
 
-window.addEventListener("pointermove", (event: PointerEvent) => {
-	const nx = (event.clientX / window.innerWidth) * 2 - 1;
-	const ny = (event.clientY / window.innerHeight) * 2 - 1;
-	stage.followPointer(nx, ny);
-});
+// 她看着鼠标 —— 位置由 Go 报过来（光标相对窗口中心，-1..1）。
+//
+// 不能靠页面的 pointermove：窗口大部分是点击穿透的，指针压在那上面时页面
+// 根本收不到事件，她的头就会停在最后一次「路过」的方向上（之前一直抬着头
+// 就是这个）。Go 那边直接问 Windows 光标在哪，指到哪儿看到哪儿。
+setInterval(() => {
+	void GoShell.gaze()
+		.then((gaze) => stage.followPointer(gaze.x, gaze.y))
+		.catch(() => {});
+}, 100);
 
 /** 这一处（或它上面的某一层）是不是拖窗区：CSS 里写着 `--app-region: drag`。 */
 function draggable(node: EventTarget | null): Element | null {
@@ -121,14 +126,22 @@ function draggable(node: EventTarget | null): Element | null {
  */
 let dragFrom: { x: number; y: number } | null = null;
 
+/** 输入框和按钮自己要用鼠标，别的地方按下去都算拖窗。 */
+function interactive(node: EventTarget | null): Element | null {
+	if (!(node instanceof Element)) return null;
+	return node.closest("#composer, button, input, textarea, a, select");
+}
+
 window.addEventListener(
 	"pointerdown",
 	(event: PointerEvent) => {
 		if (event.button !== 0) return;
 		const element = draggable(event.target);
-		if (element === null) return;
+		// 人物身上按下去也要能拖：舞台是 pointer-events: none，事件落在 body
+		// 上，谁都匹配不到，于是「窗口拖不动」。
+		if (element === null && interactive(event.target) !== null) return;
 		dragFrom = { x: event.screenX, y: event.screenY };
-		element.setPointerCapture?.(event.pointerId);
+		(element ?? document.body).setPointerCapture?.(event.pointerId);
 		event.preventDefault();
 	},
 	true,

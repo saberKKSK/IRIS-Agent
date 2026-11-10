@@ -925,13 +925,21 @@ ADR-0037 让她的眼睛一直睁着，但用户连问两次：「这个视频�
 
 拖窗走了半天不通，先在页面上把 pointerdown 的 target 打到状态行才看清：按下去 target 先是**空 id**（Pixi 的 canvas），canvas 让开以后是 `stage`——`#stage` 和 canvas 都 `inset: 0` 盖满窗口，按哪儿都先撞上它们，`--app-region: drag` 的 grip 永远收不到按下。
 
-`apps/desktop/src/style.css` 里给 `#stage`（连带画布）加 `pointer-events: none`，注视改走 `window` 的 `pointermove`（本来就是这个路子）。`#grip` / `#hud` 与 `#stage` 在 `index.html` 里是**兄弟节点**，所以字幕条和输入框不受影响。
+`apps/desktop/src/style.css` 里给 `#stage`（连带画布）加 `pointer-events: none`，注视改由 Go 报全局光标（见修法四——一开始以为走 `window` 的 `pointermove` 就行，实测是错的）。`#grip` / `#hud` 与 `#stage` 在 `index.html` 里是**兄弟节点**，所以字幕条和输入框不受影响。
 
 ### 修法三：拖窗改成页面发增量（`Shell.MoveBy`）
 
 mygo 的原路是 `internal/windows/window.go:1509 StartDrag()` = `ReleaseCapture()` + `SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)`，由注入的 bridge 在按下 `--app-region: drag` 元素时触发。**实测纹丝不动**——判断是 WebView2 子窗口握着鼠标捕获，标题栏移动循环要的位移收不到（没逐帧证实，但换成页面驱动后立刻可用）。
 
-Go 侧：`func (s *Shell) MoveBy(dx, dy float64)`，内部 `mygo.RunOnMain` 里取 `win.Position()` 再 `win.SetPosition(x+int(math.Round(dx)), …)`。页面侧（`src/main.ts`）：捕获阶段 `pointerdown` 从 target 往上找 `--app-region`（`drag` 命中、`no-drag` 收手），记起点并 `setPointerCapture`；`pointermove` 算增量调 `GoShell.moveBy`；`pointerup`/`pointercancel` 清空。改完要 `npm run generate` 重新生成 `src/mygo.ts`。实测合成拖动 12 步 ×(16,10) 物理像素 → 窗口正好移动 `(192,120)` 物理 = `(96,60)` DIP。
+Go 侧：`func (s *Shell) MoveBy(dx, dy float64)` → `moveByWindow(hwnd, dx, dy)`（`drag_windows.go`）：`GetWindowRect` + `GetDpiForWindow` 把 DIP 增量换成物理位移，`SetWindowPos` 走 `SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE`；同一函数顺手**夹在屏幕内**（`keepVisible=80` DIP，虚拟屏坐标 `SM_XVIRTUALSCREEN` 等），拖到边上不会整窗消失。页面侧（`src/main.ts`）：捕获阶段 `pointerdown` 先从 target 往上找 `--app-region`（`drag` 命中、`no-drag` 收手），**找不到时只要不在 `interactive()`（`#composer`/`button`/`input`/`textarea`/`a`/`select`）里就照样拖**——`#stage` 是 `pointer-events: none`，按在人物身上事件落在 `body`，早先版本在这里直接 return，于是「窗口拖不动」。`pointermove` 算增量调 `GoShell.moveBy`，`pointerup`/`pointercancel` 清空。改完要 `npm run generate` 重新生成 `src/mygo.ts`。实测：合成拖动 12 步 ×(16,10) 物理像素 → 窗口正好移动 `(192,120)` 物理 = `(96,60)` DIP；按在她身上拖 `(200,120)` 物理 → 窗口 `(1016,70)` → `(1216,190)`。
+
+### 修法四：注视改成 Go 每 100 ms 报全局光标（`Shell.Gaze`）
+
+用户实测报的第三个毛病：「人物一直是抬头的」。原因不是 Live2D 的 focus 坏了，是**这个窗口大部分区域是点击穿透的**——页面的 `pointermove` 只在指针压在「吃鼠标」的那几块（身子/字幕/输入条）时才到得了页面，指针挪到屏幕别处以后她停在上一次收到的方向（那次正好是往上看），于是一直仰着头。
+
+改成页面每 100 ms 问一次 Go：`setInterval(() => GoShell.gaze().then(g => stage.followPointer(g.x, g.y)), 100)`。Go 侧 `func (s *Shell) Gaze() Gaze`（字段 `x`/`y`，−1..1，窗口中心是 0，x 向右为正、**y 向上为正**，与 Live2D 一致）→ `cursorGaze(hwnd)`：`GetWindowRect` 与 `GetCursorPos` 都在物理像素里算，比值与缩放无关；`(cx - py)/hy` 就是 Live2D 要的抬头量。非 Windows 返回 `(0,0)`。
+
+实测（抓屏裁头部 420×420 做灰度平均绝对差，光标全程在窗口外）：左↔右 **17.8**、上↔下 **14.7**、上↔左 6.7 / 下↔右 6.0。画面里光标在左她朝左看、在右朝右看，方向是对的。
 
 ### 一个坑（不是改法）：空输入区必须是 nil
 
@@ -949,7 +957,8 @@ Go 侧：`func (s *Shell) MoveBy(dx, dy float64)`，内部 `mygo.RunOnMain` 里�
 
 - **三层平台耦合**：`WS_EX_LAYERED` 与 DComp 内容本来互斥（`internal/windows/input_region.go:11-23` 的注释就是这么写的），我们能同时用是因为关掉了亚克力——这依赖一个**从未被 mygo 断言过的 DWM 行为**，Windows 大版本更新可能又变。真变了就得回到「要么整窗吃鼠标，要么整窗无内容」的老路上。
 - 关背板是 Windows-only 的 syscall，非 Windows 是空实现（macOS/Linux 下 MyGo 本来也不走这套）。
-- 拖窗是页面驱动的，所以**拖动期间窗口位置由我们的 JS 决定**：节流不当会抖，指针离开窗口（`setPointerCapture` 通常还管得住）时可能丢增量。目前没做边缘吸附/多屏夹取。
-- 注视（gaze）没做像素级核对；Esc 最小化、点穿到背后窗口的实测也没做（区域判定只验到了 exstyle）。
+- 拖窗是页面驱动的，所以**拖动期间窗口位置由我们的 JS 决定**：节流不当会抖。夹取只有「至少留 80 DIP 在屏内」，没做边缘吸附、也没按任务栏让位。
+- 注视靠轮询（10 Hz），指针移动她会**慢半拍**；离窗口越远越容易到 ±1 的饱和值，所以远距离时转角不再变。
+- 已验证（真机）：Esc 最小化（点进输入框拿焦点后发 VK_ESCAPE → `IsIconic=True`，`SW_RESTORE` 回来几何不变）、最小化→恢复后**亚克力不会回来**（恢复后采样仍是 `(21,21,23)`）、点击穿透（壳下面顶一块计数窗：透明空隙点一下计数 0→1，人物身上点一下仍是 1）、注视跟随（见修法四）。
 - 排查留下的一次性脚本在 `C:\IRIS Agent\.artifacts\`（`iso.py` / `layered_probe3.py` / `enumwin.ps1` / 各种 crop 图），没进仓库。
 

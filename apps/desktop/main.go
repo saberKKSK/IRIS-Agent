@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -107,13 +106,15 @@ func (s *Shell) SetInputRegion(rects []Rect) {
 	}
 }
 
-// MoveBy moves the window by dx, dy DIPs, while the page drags it by the
-// grip or the caption.
+// MoveBy moves the window by dx, dy DIPs, while the page drags it anywhere
+// that is not the composer.
 //
 // The page does the dragging itself: MyGo's StartDrag asks Windows to run
 // a caption move loop, which the moves it waits for never reach — the
 // WebView2 child window holds the mouse capture — so the window stayed
-// where it was. The page has the capture, so it sends the deltas.
+// where it was. The page has the capture, so it sends the deltas. The strip
+// that stays on screen is enforced here too, so she cannot be dropped off
+// the edge of the desktop.
 func (s *Shell) MoveBy(dx, dy float64) {
 	if dx == 0 && dy == 0 {
 		return
@@ -124,10 +125,32 @@ func (s *Shell) MoveBy(dx, dy float64) {
 	if win == nil {
 		return
 	}
-	mygo.RunOnMain(func() {
-		x, y := win.Position()
-		win.SetPosition(x+int(math.Round(dx)), y+int(math.Round(dy)))
-	})
+	moveByWindow(win.NativeHandle(), dx, dy)
+}
+
+// Gaze is where the mouse is relative to the window: -1..1, the window's
+// centre at 0, positive x to the right, positive y up.
+type Gaze struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
+// Gaze returns where the cursor is relative to the window's centre.
+//
+// She should look at the mouse wherever it is, so the page asks for this a
+// few times a second instead of listening for pointer moves: most of the
+// window is click-through, and over that part the pointer never reaches the
+// page at all — her head would stay where it was the last time he crossed
+// her, which is what "她一直抬着头" was.
+func (s *Shell) Gaze() Gaze {
+	s.mu.Lock()
+	win := s.win
+	s.mu.Unlock()
+	if win == nil {
+		return Gaze{}
+	}
+	x, y := cursorGaze(win.NativeHandle())
+	return Gaze{X: x, Y: y}
 }
 
 // InputRegion returns the rects the page last sent, for tests and for
@@ -213,6 +236,8 @@ func main() {
 		// Windows 11 24H2 起，没有重定向位图、靠 DirectComposition 画的窗口会被
 		// 系统默认套一层亚克力（桌面透过来是模糊+提亮的，不是原样），必须关掉。
 		disableSystemBackdrop(win.NativeHandle())
+		// 上次要是被拖到屏幕外退出的，开机先把她拽回来。
+		moveByWindow(win.NativeHandle(), 0, 0)
 		page, err := win.NewWebView(mygo.WebViewOptions{URL: "/", Transparent: true, BackgroundColor: "#00000000"})
 		if err != nil {
 			log.Printf("[shell] 页面没建起来：%v", err)

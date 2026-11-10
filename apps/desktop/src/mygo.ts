@@ -13,6 +13,15 @@ export interface Env {
   hosted: boolean;
 }
 
+/**
+ * Gaze is where the mouse is relative to the window: -1..1, the window's
+ * centre at 0, positive x to the right, positive y up.
+ */
+export interface Gaze {
+  x: number;
+  y: number;
+}
+
 /** Rect is a clickable area of the window, in DIPs from its top-left corner. */
 export interface Rect {
   x: number;
@@ -33,6 +42,18 @@ export const Shell = {
     return call("Shell.Env");
   },
   /**
+   * Gaze returns where the cursor is relative to the window's centre.
+   *
+   * She should look at the mouse wherever it is, so the page asks for this a
+   * few times a second instead of listening for pointer moves: most of the
+   * window is click-through, and over that part the pointer never reaches the
+   * page at all — her head would stay where it was the last time he crossed
+   * her, which is what "她一直抬着头" was.
+   */
+  gaze(): Promise<Gaze> {
+    return call("Shell.Gaze");
+  },
+  /**
    * InputRegion returns the rects the page last sent, for tests and for
    * screenshots of the shell.
    */
@@ -40,13 +61,15 @@ export const Shell = {
     return call("Shell.InputRegion");
   },
   /**
-   * MoveBy moves the window by dx, dy DIPs, while the page drags it by the
-   * grip or the caption.
+   * MoveBy moves the window by dx, dy DIPs, while the page drags it anywhere
+   * that is not the composer.
    *
    * The page does the dragging itself: MyGo's StartDrag asks Windows to run
    * a caption move loop, which the moves it waits for never reach — the
    * WebView2 child window holds the mouse capture — so the window stayed
-   * where it was. The page has the capture, so it sends the deltas.
+   * where it was. The page has the capture, so it sends the deltas. The strip
+   * that stays on screen is enforced here too, so she cannot be dropped off
+   * the edge of the desktop.
    */
   moveBy(dx: number, dy: number): Promise<void> {
     return call("Shell.MoveBy", dx, dy);
