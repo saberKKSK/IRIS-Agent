@@ -94,6 +94,14 @@ func moveByWindow(hwnd uintptr, dx, dy float64) {
 	)
 }
 
+// gazeReach 是「指多远算看到边」——取窗口长边的一半再乘上它。窗口本身很高，
+// 按半宽归一的话屏幕正上方一点点就把她顶成满格抬头；按长边算，鼠标停在屏幕中间
+// 时她基本是平视。
+const gazeReach = 1.6
+
+// gazeDead 是中间那一圈不动区：指针在窗口中心附近时头不该有一点抽动。
+const gazeDead = 0.18
+
 // cursorGaze says where the cursor is relative to the window's centre: -1..1,
 // positive x right, positive y up (Live2D's convention).
 //
@@ -111,9 +119,18 @@ func cursorGaze(hwnd uintptr) (float64, float64) {
 	}
 	cx := float64(r.left+r.right) / 2
 	cy := float64(r.top+r.bottom) / 2
-	hx := float64(r.right-r.left) / 2
-	hy := float64(r.bottom-r.top) / 2
-	return clampUnit((float64(p.x) - cx) / hx), clampUnit((cy - float64(p.y)) / hy)
+	long := math.Max(float64(r.right-r.left), float64(r.bottom-r.top))
+	reach := math.Max(1, long/2*gazeReach)
+	return softZone((float64(p.x) - cx) / reach), softZone((cy - float64(p.y)) / reach)
+}
+
+// softZone 把 -1..1 掰成「中间不动、边上照样满格」的一条折线。
+func softZone(v float64) float64 {
+	v = clampUnit(v)
+	if math.Abs(v) <= gazeDead {
+		return 0
+	}
+	return math.Copysign((math.Abs(v)-gazeDead)/(1-gazeDead), v)
 }
 
 func clampUnit(v float64) float64 {

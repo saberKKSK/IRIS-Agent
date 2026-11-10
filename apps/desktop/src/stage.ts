@@ -17,8 +17,30 @@ const MODEL_FILE = "大肥鱼.iris.model3.json";
 const DEG = Math.PI / 180;
 
 type CoreModel = {
-	setParameterValueById(id: string, value: number, weight?: number): void;
+	getParameterCount(): number;
+	getParameterId(index: number): unknown;
+	setParameterValueByIndex(index: number, value: number, weight?: number): void;
 };
+
+/**
+ * 参数名 → 下标。
+ *
+ * 这个 fork 的 setParameterValueById(id) 只认 CubismId **对象**：它的 getParameterIndex
+ * 拿传进来的字符串跟 _parameterIds.at(i)（CubismId 实例）做 != 比较，永远不等，于是
+ * 悄悄在 _notExistParameterId 里编一个新下标、把值写进一张假表——读回来是自己刚写的数，
+ * 真模型一个参数都没动（2026-11-10 实测：写 ParamMouthOpenY=1、ParamEyeLOpen=0、
+ * ParamAngleZ=25，眼睛照睁、嘴照闭、头照直）。所以这里自己按 index 建表。
+ */
+function buildParams(core: CoreModel): Map<string, number> {
+	const map = new Map<string, number>();
+	const count = core.getParameterCount();
+	for (let i = 0; i < count; i += 1) {
+		const raw = core.getParameterId(i) as { getString?: () => { s?: string } } | undefined;
+		const name = raw?.getString?.()?.s;
+		if (typeof name === "string") map.set(name, i);
+	}
+	return map;
+}
 
 /** 这个 fork 的 internalModel 在 d.ts 里是可选的、也缺 renderer，这里补上我们真用到的部分。 */
 type InternalLike = {
@@ -54,6 +76,8 @@ export class Stage {
 	private host: HTMLElement | null = null;
 	private model: Live2DModel | null = null;
 	private core: CoreModel | null = null;
+	/** 参数名 → 下标（fork 只认 CubismId 对象，字符串 id 会静默失效，见 buildParams 注释）。 */
+	private params: Map<string, number> | null = null;
 	private status: (text: string) => void = () => {};
 	private base = "/live2d";
 
@@ -92,6 +116,7 @@ export class Stage {
 		if (app === null || model === null) return { mounted: false };
 		return {
 			mounted: true,
+			dpr: this.dpr(),
 			screen: [app.screen.width, app.screen.height],
 			canvas: [app.canvas.width, app.canvas.height],
 			position: [model.x, model.y],
@@ -116,15 +141,17 @@ export class Stage {
 		const width = b.maxX - b.minX;
 		const height = b.maxY - b.minY;
 		if (!(width > 0) || !(height > 0)) return null;
+		// 舞台的坐标是设备像素，窗口要的是 DIP（= CSS px），换回去。
+		const dpr = this.dpr();
 		const padX = 14;
 		const padTop = 56;
-		const x = Math.max(0, Math.floor(b.minX - padX));
-		const y = Math.max(0, Math.floor(b.minY - padTop));
+		const x = Math.max(0, Math.floor((b.minX - padX) / dpr));
+		const y = Math.max(0, Math.floor((b.minY - padTop) / dpr));
 		return {
 			x,
 			y,
-			width: Math.min(app.screen.width - x, Math.ceil(width + padX * 2)),
-			height: Math.min(app.screen.height - y, Math.ceil(height + padTop)),
+			width: Math.min(Math.floor(app.screen.width / dpr) - x, Math.ceil((width + padX * 2) / dpr)),
+			height: Math.min(Math.floor(app.screen.height / dpr) - y, Math.ceil((height + padTop) / dpr)),
 		};
 	}
 
@@ -136,17 +163,25 @@ export class Stage {
 		this.lastDrive = this.bornAt;
 		this.nextBlink = this.bornAt + 1400 + Math.random() * 2600;
 
+		// 画布按「设备像素」开，不是按 CSS 像素：这台机器是 200% 缩放，开成 CSS 尺寸
+		// 等于先画 520×840 再被浏览器拉大一倍，模型边缘糊成一片。
+		// resolution 必须是 1 —— 这个 fork 用 renderer.width（画布真实像素）设 GL
+		// viewport，却用 renderer.screen（CSS 尺寸）算投影矩阵；resolution=2 时两者差
+		// 一倍，人被画成一半大、挤在左下角。这里让 screen 直接等于真实像素，再把 CSS
+		// 尺寸交给样式表（100%），浏览器按 1:1 显示。
+		const dpr = this.dpr();
 		const app = new Application();
 		await app.init({
-			resizeTo: host,
+			width: Math.max(1, Math.round(host.clientWidth * dpr)),
+			height: Math.max(1, Math.round(host.clientHeight * dpr)),
 			backgroundAlpha: 0,
 			antialias: true,
-			autoDensity: true,
-			// 必须是 1：这个 fork 用 renderer.screen（CSS 尺寸）设 gl.viewport，
-			// 一旦 canvas 后备缓冲是它的 2 倍，人就被画成一半大、挤在左下角。
+			autoDensity: false,
 			resolution: 1,
 			preference: "webgl",
 		});
+		app.canvas.style.width = "100%";
+		app.canvas.style.height = "100%";
 		host.appendChild(app.canvas);
 		this.app = app;
 
@@ -158,6 +193,7 @@ export class Stage {
 		this.model = model;
 		const internal = internalOf(model);
 		this.core = internal.coreModel as unknown as CoreModel;
+		this.params = buildParams(this.core);
 
 		// 默认的「贴图版遮罩」在 Pixi v8 这里画不出来（嘴巴/口内整块糊在脸上，边缘也带白边），
 		// 换成高精度遮罩（逐 drawable 的裁剪矩阵）就正常了。这个 fork 没暴露 setter，只能写字段。
@@ -185,8 +221,8 @@ export class Stage {
 		internal.on("beforeModelUpdate", () => this.drive());
 
 		(window as unknown as { __stage?: unknown }).__stage = this;
-		window.addEventListener("resize", () => this.layout());
-		new ResizeObserver(() => this.layout()).observe(host);
+		window.addEventListener("resize", () => this.syncSize());
+		new ResizeObserver(() => this.syncSize()).observe(host);
 		app.ticker.add(() => this.updateFocus());
 		this.status("");
 	}
@@ -222,21 +258,42 @@ export class Stage {
 		}
 	}
 
+	/** 这块屏幕的像素比（200% 缩放是 2）。 */
+	private dpr(): number {
+		return Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+	}
+
+	/** 画布跟着 #stage 的 CSS 尺寸走，换算成设备像素。 */
+	private syncSize(): void {
+		const app = this.app;
+		const host = this.host;
+		if (app === null || host === null) return;
+		const dpr = this.dpr();
+		const w = Math.max(1, Math.round(host.clientWidth * dpr));
+		const h = Math.max(1, Math.round(host.clientHeight * dpr));
+		if (app.renderer.screen.width === w && app.renderer.screen.height === h) return;
+		app.renderer.resize(w, h);
+		app.canvas.style.width = "100%";
+		app.canvas.style.height = "100%";
+		this.layout();
+	}
+
 	private layout(): void {
 		const app = this.app;
 		const model = this.model;
 		if (app === null || model === null) return;
+		const dpr = this.dpr();
 		const w = app.screen.width;
 		const h = app.screen.height;
 		if (w <= 0 || h <= 0) return;
 		this.laidW = w;
 		this.laidH = h;
-		// 底下那条字幕/输入条大约 96 px，人别站到它后面去；脚贴底边留一点余量。
-		const usable = Math.max(240, h - 96);
+		// 底下那条字幕/输入条大约 96 CSS px，人别站到它后面去；脚贴底边留一点余量。
+		const usable = Math.max(240 * dpr, h - 96 * dpr);
 		const scale = usable / Math.max(1, internalOf(model).originalHeight ?? 1);
 		model.scale.set(scale);
 		model.x = w / 2;
-		model.y = h - 56;
+		model.y = h - 56 * dpr;
 		const anchor = (model as unknown as { anchor?: { set(x: number, y: number): void } }).anchor;
 		if (anchor !== undefined && typeof anchor.set === "function") {
 			anchor.set(0.5, 1);
@@ -249,23 +306,24 @@ export class Stage {
 	private updateFocus(): void {
 		const model = this.model;
 		if (model === null) return;
-		// Pixi 的 resizeTo 只在 ResizeObserver 里改 renderer.screen；窗口 show 出来之后
-		// 尺寸才定，所以每帧比一下最省事。
+		// 窗口 show 出来后尺寸才定，ResizeObserver 偶尔漏一拍，每帧比一下最省事。
 		const app = this.app;
 		if (app !== null && (app.screen.width !== this.laidW || app.screen.height !== this.laidH)) this.layout();
 		const k = 0.14;
 		this.focus.x += (this.gaze.x - this.focus.x) * k;
 		this.focus.y += (this.gaze.y - this.focus.y) * k;
-		try {
-			model.focus(this.focus.x, this.focus.y);
-		} catch {
-			/* focus 不是必需能力，抛了就算了 */
-		}
+	}
+
+	/** 按名字写一个参数（名字不存在就当没这个参数）。 */
+	private put(name: string, value: number): void {
+		const core = this.core;
+		const index = this.params?.get(name);
+		if (core === null || index === undefined) return;
+		core.setParameterValueByIndex(index, value, 1);
 	}
 
 	private drive(): void {
-		const core = this.core;
-		if (core === null) return;
+		if (this.core === null || this.params === null) return;
 		const now = performance.now();
 		const dt = Math.min(0.1, Math.max(0, (now - this.lastDrive) / 1000));
 		this.lastDrive = now;
@@ -279,9 +337,9 @@ export class Stage {
 		this.tilt += (this.tiltTarget - this.tilt) * Math.min(1, dt * 6);
 		const angleZ = Math.sin((t * 2 * Math.PI) / 5.1) * 0.7 + this.tilt;
 
-		core.setParameterValueById("ParamBodyAngleZ", bodyZ);
-		core.setParameterValueById("ParamBodyAngleX", bodyX);
-		core.setParameterValueById("ParamAngleZ", angleZ);
+		this.put("ParamBodyAngleZ", bodyZ);
+		this.put("ParamBodyAngleX", bodyX);
+		this.put("ParamAngleZ", angleZ);
 
 		// 眨眼：随机间隔，偶尔连眨两下；说话时不眨
 		let eye = 1;
@@ -301,14 +359,23 @@ export class Stage {
 				}
 			}
 		}
-		core.setParameterValueById("ParamEyeLOpen", eye);
-		core.setParameterValueById("ParamEyeROpen", eye);
+
+		// 视线：这个 fork 的 model.focus(x, y) 要的是 Pixi 世界坐标，传 -1..1 会被
+		// toModelPosition 折算到模型中心附近，等于没动（2026-11-10 实测：光标拉到屏幕两端，
+		// 头一毫米都不转）。这里直接写角度——写在 updateFocus/physics 之后，谁也盖不掉。
+		this.put("ParamAngleX", this.focus.x * 26);
+		this.put("ParamAngleY", this.focus.y * 20);
+		this.put("ParamEyeBallX", this.focus.x);
+		this.put("ParamEyeBallY", this.focus.y);
+
+		this.put("ParamEyeLOpen", eye);
+		this.put("ParamEyeROpen", eye);
 
 		// 口型：先在包络上凑合，TTS 进来后换成 AudioAnalyzer 的真 RMS
 		const target = this.talking
 			? 0.24 + 0.3 * (0.5 + 0.5 * Math.sin(t * 13.7)) * (0.55 + 0.45 * Math.sin(t * 4.1 + 1.2))
 			: 0;
 		this.mouth += (target - this.mouth) * Math.min(1, dt * 18);
-		core.setParameterValueById("ParamMouthOpenY", Math.max(0, Math.min(0.85, this.mouth)));
+		this.put("ParamMouthOpenY", Math.max(0, Math.min(0.85, this.mouth)));
 	}
 }

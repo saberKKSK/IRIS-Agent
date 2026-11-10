@@ -949,6 +949,43 @@ Go 侧：`func (s *Shell) MoveBy(dx, dy float64)` → `moveByWindow(hwnd, dx, dy
 
 修法是恢复 / 重新显示时补一张：`win.OnRestore(func() { win.Invalidate() })` 与 `win.OnShow(...)` 各挂一个 `Invalidate`。验证方式是把恢复后的窗口裁剪和「最小化之前」的同一块裁剪做逐像素均差——修之前恢复后差 200+（等于桌面），修之后 +1.6 s 就是 1.95、稳定后 5.9~8.0，和静止呼吸本身的基线（6.47）同量级。
 
+### 修法六：画布要按设备像素开，resolution 必须是 1
+
+窗口在 200% 缩放下糊成一团：裙褶、发丝、睫毛边缘全是软的。原因是 Pixi 按 CSS 像素建画布（520×840），再被系统放大到 1040×1680——相当于 1→2 的重采样。
+
+改成 `app.init({ width: round(clientWidth * dpr), height: round(clientHeight * dpr), autoDensity: false, resolution: 1 })`，init 后把 `canvas.style.width/height` 打回 `100%`，并新增 `syncSize()`（比尺寸 → `renderer.resize(w, h)` → 样式打回 → `layout()`）挂在 `window.resize` 与 `ResizeObserver` 上。
+
+**`resolution` 不能图省事写 2**：这个 fork 用 `renderer.width`（画布真实像素）设 GL viewport，却用 `renderer.screen`（CSS 尺寸）算投影矩阵（`@naari3/pixi-live2d-display/dist/index.es.js:2646-2667`），差一倍就画成一半大、挤在左下角。
+
+### 修法七：Live2D 参数**必须按 index 写**，写字符串 id 一律无声失效
+
+这是「她一直抬头、口型看不见、表情不生效」的总根因，比透明那个坑更隐蔽。
+
+`dist/index.es.js:13519 getParameterIndex(parameterId)` 把传进来的**字符串**直接和 `this._parameterIds.at(i)`（CubismId **对象**）比 `!=`，永远不等 → 落到 13528 的 `_notExistParameterId` / `_notExistParameterValues` 分支，编一个 `count + n` 的假下标，值写进一张假表。上游 Cubism 的用法是先 `CubismFramework.getIdManager().getId(str)` 拿对象再传，这个 fork 没做。
+
+它最坑的地方是**读回来是对的**：`getParameterValueById("ParamMouthOpenY")` 返回的就是你自己刚写的数，所以「写进去→读回来一样」这条自检完全无法发现。
+
+修法是在 `stage.ts` 里建名字→下标表，绕开字符串路径：
+
+- `function buildParams(core: CoreModel): Map<string, number>`：遍历 `getParameterCount()`，用 `getParameterId(i).getString().s` 取真名（直接 `String(id)` 得到 `[object Object]`）。
+- `load()` 里 `this.params = buildParams(this.core)`。
+- `private put(name, value)`：查表 → `core.setParameterValueByIndex(index, value, 1)`；表里没有就当没这个参数。
+- `drive()` 里所有写入统一走 `put()`。
+
+模型共 **509** 个参数（全表导到 `.artifacts/params_dump.json`）。常用下标：`ParamMouthOpenY=107`、`ParamMouthForm=106`、`ParamAngleX=28` / `Y=29` / `Z=30`、`ParamEyeLOpen=97` / `ROpen=85`、`ParamEyeBallX=76` / `Y=77`、`ParamBodyAngleX=36` / `Z=41`、`ParamBreath=508`。
+
+顺带一提：**标准名其实都在**（`ParamAngleX/Y/Z`、`ParamEyeBallX/Y`、`JawOpen`、`ParamBreath`、模型自带的 `key1..key13`），之前查出来「只有 MouthOpenY 存在」是同一个 bug 造成的假象。
+
+### 修法八：视线别用 `model.focus()`，要世界坐标；直接写角度
+
+`dist/index.es.js:2478 focus(x, y, instant)` 期望的是 **Pixi 世界坐标**，内部 `toModelPosition()` 折算到模型局部再 `/originalWidth*2-1`。我们一直喂 `-1..1`，落点几乎就在模型中心，算出来的 `focusController` 常年 ≈ 0。
+
+而每帧真正写参数的是 `internalModel.updateFocus()`（`dist/index.es.js:11487-11502`）：`ParamAngleX = focusController.x * 30`、`ParamAngleY`、`ParamEyeBallX/Y`、`ParamAngleZ`、`ParamBodyAngleX`。所以表现为「光标拉到屏幕两端，`gaze` 读到 ±1.00，头一毫米不转」。
+
+修法：`updateFocus()` 里删掉 `model.focus(...)`，只留缓动；在 `drive()` 里直写角度（`ParamAngleX = focus.x * 26`、`ParamAngleY = focus.y * 20`、`ParamEyeBallX/Y = focus.x / focus.y`）。
+
+**写的时机是关键**：这个 fork 每帧的顺序是 `motionManager.update` → `expressionManager.update` → `eyeBlink.updateParameters` → `saveParameters` → `updateNaturalMovements`（呼吸）→ **`physics.evaluate`** → `pose.updateParameters` → **`updateFocus()`** → emit `beforeModelUpdate` → `model.update()`。我们的 `drive()` 挂在 `beforeModelUpdate` 上，正好压在 physics 和 updateFocus **之后**，谁也盖不掉；物理的 Output 里含 `ParamAngleX/Y/Z`，写在前面是白写。
+
 ### 一个坑（不是改法）：空输入区必须是 nil
 
 `SetInputRegion` 收到空列表时**不能传长度为 0 的非 nil 切片**——mygo 按 `inputRegion != nil` 判断 layered（`window.go:1321-1329`），`make([]Rectangle,0,…)` 会让窗口从第一帧起就是 layered。改成 `var out []mygo.Rectangle`（空即 nil），语义是「整窗吃鼠标」。
@@ -958,7 +995,11 @@ Go 侧：`func (s *Shell) MoveBy(dx, dy float64)` → `moveByWindow(hwnd, dx, dy
 - **透明**：抓屏采样窗内 `(1050,100)`/`(1300,400)`/`(1900,1500)` = `(21,21,23)`/`(21,21,23)`/`(44,44,46)`，窗外同层 `(19,19,21)`/`(21,21,23)` ⇒ 桌面原样透出，无灰无膜。此时窗口**仍是 layered**（页面发过输入区）且 `backdrop=1` —— 证明关掉亚克力后 layered + DComp 内容完全可用。
 - **逐矩形穿透**：页面上报输入区（DIP）`body 59,0 388x794` / `grip 168,0 172x14` / `composer 12,753 483x48`（`src/main.ts:33-38 reportRegion()`，boot 里每 500 ms 重报）；轮询 `WS_EX_TRANSPARENT` 判读：grip / 身子 / 输入条上 through=False，左侧空隙 (20,115) through=True。mygo 侧是 `internal/windows/input_region.go:96-112 followCursor()` 的 10 ms 定时器按光标切样式。
 - **页面输入**：点输入框 + 逐字 `keybd_event` 打出 `test23`，截图里输入框确实显示出来了。
-- **端到端对话**：`POST /say {"text":"在吗？刚才窗子终于是透的了"}` → 202，约 8 s 后字幕条出现「嗯，透的」。口型由 `stage.ts:308-312` 的 `talking` 包络写 `ParamMouthOpenY` 驱动（`main.ts:48/54/68` 开关）；上半身区域逐帧灰度差在字幕出现那两帧是 10.9 / 13.2，之后回落到 4.6（只剩呼吸）——**没有逐帧核对口型**。
+- **端到端对话**：`POST /say {"text":"在吗？刚才窗子终于是透的了"}` → 202，约 8 s 后字幕条出现「嗯，透的」。口型由 `stage.ts` 的 `talking` 包络写 `ParamMouthOpenY` 驱动（`main.ts:48/54/68` 开关）；上半身区域逐帧灰度差在字幕出现那两帧是 10.9 / 13.2，之后回落到 4.6（只剩呼吸）。
+- **端到端（参数修好之后）**：`POST /say {"text":"你在吗？我刚把参数修好了，现在你的表情应该是我在控制了"}` → 202，字幕条「我的表情，你在控制」/「这话说得，跟我是你手上的一个参数似的」，状态行 `首字 4.3s · 整轮 4.5s · high`；连拍里嘴有一张一合（`.artifacts/talk-12.png` 微张、`talk-16.png` 闭合）。**口型仍只做了肉眼确认，没做逐帧像素统计**。
+- **参数通路**：按 index 写之后 `ParamMouthOpenY=1` 真张嘴、`ParamEyeLOpen/ROpen=0` 真闭眼、`ParamAngleZ=25` 真歪头（`.artifacts/probe6-face.png` 与同批 `probe6-status.png`）。
+- **注视**：光标在屏幕最左 → 朝左（`.artifacts/g3-L.png`）、最右 → 朝右（`g3-R.png`）、最上 → 抬头（`g3-U.png`），头部裁剪差异肉眼可辨；改之前同一实验（`focus-fl.png` / `focus-fr.png`）头部完全不动。
+- **清晰度**：200% 缩放下 `.artifacts/sharp-win.png` 的裙褶与发丝边缘是锐的，改 DPR 之前同一窗口明显发虚。
 - `cd apps/desktop; go build -mod=mod ./...` exit 0；`bunx tsc --noEmit` exit 0。
 
 ### 代价与边界
@@ -966,7 +1007,8 @@ Go 侧：`func (s *Shell) MoveBy(dx, dy float64)` → `moveByWindow(hwnd, dx, dy
 - **三层平台耦合**：`WS_EX_LAYERED` 与 DComp 内容本来互斥（`internal/windows/input_region.go:11-23` 的注释就是这么写的），我们能同时用是因为关掉了亚克力——这依赖一个**从未被 mygo 断言过的 DWM 行为**，Windows 大版本更新可能又变。真变了就得回到「要么整窗吃鼠标，要么整窗无内容」的老路上。
 - 关背板是 Windows-only 的 syscall，非 Windows 是空实现（macOS/Linux 下 MyGo 本来也不走这套）。
 - 拖窗是页面驱动的，所以**拖动期间窗口位置由我们的 JS 决定**：节流不当会抖。夹取只有「至少留 80 DIP 在屏内」，没做边缘吸附、也没按任务栏让位。
-- 注视靠轮询（10 Hz），指针移动她会**慢半拍**；离窗口越远越容易到 ±1 的饱和值，所以远距离时转角不再变。
+- 注视靠轮询（10 Hz），指针移动她会**慢半拍**；够得着的半径是窗口长边的一半再 ×1.6，半径内线性软区（死区 0.18），超出饱和在 ±1，所以远距离时转角不再变。
+- 参数按 index 写是绕过 fork 的 bug，不是修 fork：**任何照抄官方文档用字符串 id 的代码，在这套依赖上都会无声失效**。以后接新模型先做一次「写 1 看画面对不对」的冒烟，别信读回值——它连读回值都是假的。
 - 已验证（真机）：Esc 最小化（点进输入框拿焦点后发 VK_ESCAPE → `IsIconic=True`，`SW_RESTORE` 回来几何不变）、最小化→恢复后**亚克力不会回来**（恢复后采样仍是 `(21,21,23)`）、点击穿透（壳下面顶一块计数窗：透明空隙点一下计数 0→1，人物身上点一下仍是 1）、注视跟随（见修法四）。
 - 排查留下的一次性脚本在 `C:\IRIS Agent\.artifacts\`（`iso.py` / `layered_probe3.py` / `enumwin.ps1` / 各种 crop 图），没进仓库。
 
