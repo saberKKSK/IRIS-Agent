@@ -1,6 +1,8 @@
 import { Live2DModel } from "@naari3/pixi-live2d-display/cubism5";
 import { Application, Graphics, Ticker } from "pixi.js";
 
+import { MOOD_IDS, Mood } from "./mood";
+
 /**
  * 大肥鱼的驱动层。
  *
@@ -87,6 +89,10 @@ export class Stage {
 	private exprCache = new Map<string, Map<string, number>>();
 	/** 这一张脸摆到什么时候（毫秒时间戳）；到点自己收回默认脸。 */
 	private exprUntil = 0;
+	/** 情绪状态机：情绪脸不是「切过去」，是被状态挑出来的（ADR-0042）。 */
+	private mood = new Mood();
+	/** 上一帧摆的情绪脸，变了才重新淡入。 */
+	private shownFace: string | null = null;
 	private status: (text: string) => void = () => {};
 	private base = "/live2d";
 
@@ -268,6 +274,16 @@ export class Stage {
 	 * 还红着，那就不是情绪了，是卡住了。传 0 表示不设期限（收回时用）。
 	 */
 	async setExpression(id: string, holdMs = EXPRESSION_HOLD_MS): Promise<void> {
+		// 八张情绪脸先过状态机：她写的词只是「推一把」，真正摆哪张看当下的 V/A
+		if (MOOD_IDS.has(id)) {
+			this.mood.hit(id);
+			return;
+		}
+		await this.applyFace(id, holdMs);
+	}
+
+	/** 真的把一张脸淡上去（部件开关互斥写入）；情绪层也是调它。 */
+	private async applyFace(id: string, holdMs = EXPRESSION_HOLD_MS): Promise<void> {
 		const targets = await this.loadExpression(id);
 		if (targets === null) return;
 		const names = new Set<string>([...this.exprValues.keys(), ...this.exprTargets.keys(), ...targets.keys()]);
@@ -426,7 +442,13 @@ export class Stage {
 		// 表情：这些开关参数（key*/Clothes*/Movement*）没人跟我们抢，淡过去就行
 		if (this.exprUntil !== 0 && performance.now() > this.exprUntil) {
 			this.exprUntil = 0;
-			void this.setExpression("body_default", 0);
+			void this.applyFace("body_default", 0);
+		}
+		// 情绪层：状态自己衰减，脸跟着状态换；没情绪的时候什么都不写
+		const face = this.mood.step(dt);
+		if (face !== this.shownFace) {
+			this.shownFace = face;
+			void this.applyFace(face ?? "body_default", 0);
 		}
 		if (this.exprTargets.size > 0) {
 			const k = Math.min(1, dt * 6);

@@ -7,6 +7,8 @@ import {
 	createSession,
 	defaultArchivePath,
 	SqliteArchive,
+	screenTools,
+	webTools,
 } from "../../../packages/iris-core/src/index.ts";
 
 /**
@@ -56,6 +58,10 @@ const session = createSession({
 		speaking: false,
 	},
 	relationship: { closeness: 0.45, sharedMoments: 0, lastInteractionAt: Date.now() },
+	// 壳里的她也得能真的看、真的查（ADR-0042）。工具一进来，system prompt 的能力段
+	// 也跟着点亮（session.ts 的 canSearch / canSee 是按 tools 名字算的）。
+	// 文件 / 写 / 命令 / 抖音暂不接：它们靠「问她要不要放开」才安全，壳里没有终端问她。
+	tools: [...webTools(), ...screenTools()],
 });
 
 /** @type {Set<import("node:http").ServerResponse>} */
