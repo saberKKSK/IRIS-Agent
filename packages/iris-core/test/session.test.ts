@@ -610,3 +610,50 @@ test("强制工具那一轮：turn 里记的是 none（那一请求真的关了�
 	const turn = await session.say("帮我搜一下今天有什么 AI 新闻");
 	assert.equal(turn.effort, "none");
 });
+
+test("主动开口：没人问也能说一句，那句 cue 留在历史里（ADR-0037）", async () => {
+	const seen: AgentMessage[][] = [];
+	const session = createSession({
+		persona: PERSONA,
+		streamFn: scripted(["我在听", "你在跑测试，报错那行我看见了"], (messages) => seen.push([...messages])),
+		compact: false,
+		resumeMessages: 0,
+	});
+	await session.say("我先跑个测试");
+	const turn = await session.speakUp();
+	assert.match(turn.text, /报错/u);
+	const last = seen.at(-1)?.at(-1);
+	assert.equal(last?.role, "user");
+	assert.match(textOf(last as AgentMessage), /你自己开口/u);
+	// 没有人问过的那一轮不该被当成对方说的话
+	assert.equal(textOf(session.messages.at(-4) as AgentMessage), "我先跑个测试");
+});
+
+test("感知层：每轮请求末尾带上他在干什么，session 自己的历史不留（ADR-0037）", async () => {
+	const seen: AgentMessage[][] = [];
+	const session = createSession({
+		persona: PERSONA,
+		streamFn: scripted(["嗯"], (messages) => seen.push([...messages])),
+		compact: false,
+		resumeMessages: 0,
+		perception: () => "他屏幕上是：一个终端，正在跑测试（刚刚）",
+	});
+	await session.say("在干嘛");
+	const last = seen[0]?.at(-1) as AgentMessage;
+	assert.match(textOf(last), /一个终端/u);
+	assert.match(textOf(last), /正在跑测试/u);
+	assert.equal(textOf(session.messages.at(-2) as AgentMessage), "在干嘛");
+});
+
+test("没接感知层：一个字都不加", async () => {
+	const seen: AgentMessage[][] = [];
+	const session = createSession({
+		persona: PERSONA,
+		streamFn: scripted(["嗯"], (messages) => seen.push([...messages])),
+		compact: false,
+		resumeMessages: 0,
+	});
+	await session.say("在干嘛");
+	const last = seen[0]?.at(-1) as AgentMessage;
+	assert.doesNotMatch(textOf(last), /他屏幕上是/u);
+});

@@ -83,7 +83,7 @@ test("MCP 子进程：握手之后 tools/call 能拿到 JSON", async () => {
 		{ serverPath: stubPath, home: sandbox, timeoutMs: 20_000 },
 	);
 	assert.equal(result.ok, true);
-	assert.equal(result.data?.list instanceof Array, true);
+	assert.equal(Array.isArray(result.data?.list), true);
 });
 
 test("推荐流：摊成能判断的几行，带 id 和链接", async () => {

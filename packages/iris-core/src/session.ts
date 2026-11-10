@@ -38,7 +38,6 @@ import {
 	DEFAULT_SESSION_EFFORT,
 	LOCAL_API_KEY,
 	MAGPIE_MODEL,
-	MAGPIE_REASONING_EFFORT,
 	type ModelReasoningEffort,
 	magpieModel,
 } from "./model.ts";
@@ -165,10 +164,19 @@ export interface IrisSessionOptions {
 	tools?: AgentTool[];
 	/** 只读文件能看的根目录（真路径）。给了就写进 prompt，免得她拿「桌面」当字面路径去猜。 */
 	lookRoots?: readonly string[];
+	/** 他放开给她写的文件夹（真路径）；跟 lookRoots 是两本账（ADR-0034）。 */
+	writeRoots?: readonly string[];
+	/** 她能跑命令的文件夹（真路径）；默认就是能写的那几个（ADR-0035）。 */
+	shellRoots?: readonly string[];
 	/** 名单上能回私信的人（ADR-0029）；只在不传 tools 时才需要，传了 douyin_im 就自动点亮。 */
 	dmNames?: readonly string[];
 	/** 写回记忆的默认标签。 */
 	episodeTags?: readonly string[];
+	/**
+	 * 感知层给的一行「他现在在干什么」（ADR-0037）。每次请求现问一次，贴在对方那句话后面；
+	 * 没接感知层就不贴。返回 null 表示还没有可用的描述。
+	 */
+	perception?: () => string | null;
 	/** 时间源，测试可注入。 */
 	clock?: () => number;
 	/** 会话级事件监听。 */
@@ -260,6 +268,12 @@ const DM_NUDGE_START = "\n\n（这一句是让你去看私信";
 const PROMISE_NUDGE_START = "\n\n（这一句是让你去把上一条答应的事查掉";
 /** 两种提示共有的前缀，摘历史时认它。 */
 const NUDGE_PREFIX = "\n\n（这一句是";
+
+/**
+ * 她自己开口时那条 cue 的开头。刻意不用 NUDGE_PREFIX：这句要留在历史里，
+ * 否则下次她看见「自己说过的话」却不知道为什么说，像凭空冒出来。
+ */
+const SELF_START = "\n\n（你自己开口：";
 
 /** 这句是在问私信。 */
 const DM_HINT = /私信|私聊|谁给我发|给我发|谁找我|有什么消息|消息记录|未读|\bdm\b/i;
@@ -407,8 +421,14 @@ export class IrisSession {
 	/** 工具名集合。prompt 里教哪几件事，看手上真有什么（ADR-0026：文件三件和联网是两套说法）。 */
 	private readonly toolNames: Set<string>;
 	/** 只读文件的起点，写进 prompt 用（ADR-0026 补丁：她原来不知道家目录长什么样）。 */
-	private readonly lookRoots: readonly string[];
+	private lookRoots: readonly string[];
+	/** 能写的地方（ADR-0034）。跟能看的分开记，放开一个不等于放开另一个。 */
+	private writeRoots: readonly string[];
+
+	private shellRoots: readonly string[];
 	private readonly dmNames: readonly string[];
+	/** 感知层：每轮现问一次「他现在在干什么」（ADR-0037）。 */
+	private readonly perception: (() => string | null) | undefined;
 	private restoredCount = 0;
 	private styleName: string | null;
 	private readonly episodeTags: readonly string[];
@@ -438,7 +458,6 @@ export class IrisSession {
 	/** 上一轮对方说的话 / 调了几次工具 / 工具报错几次 / 活干完没有。信封就靠这几样。 */
 	private lastInput = "";
 	private lastToolCalls = 0;
-	private lastToolErrors = 0;
 	private lastUnfinished = false;
 	/** 这一轮工具报错过几次（收尾时折进 lastToolErrors）。 */
 	private toolErrorsThisTurn = 0;
@@ -469,7 +488,10 @@ export class IrisSession {
 		// 构造发生在 buildPrompt() 之前：prompt 里写「你能上网 / 你能看文件」要使真手上有的工具。
 		this.toolNames = new Set((options.tools ?? []).map((tool) => tool.name));
 		this.lookRoots = options.lookRoots ?? [];
+		this.writeRoots = options.writeRoots ?? [];
+		this.shellRoots = options.shellRoots ?? options.writeRoots ?? [];
 		this.dmNames = options.dmNames ?? [];
+		this.perception = options.perception;
 		// 先把会话行定下来，再拿它接历史：重启复用的是同一条会话，不是又一条新的。
 		this.conversationId = this.startConversation();
 		const model = magpieModel(options);
@@ -559,6 +581,28 @@ export class IrisSession {
 		this.state = { ...this.state, ...patch };
 	}
 
+	/**
+	 * 换掉「她手边能看哪几个文件夹」。他刚放开一个新地方时要调一次，
+	 * 否则 prompt 里还写着「只有家目录」，她会照旧说没权限（ADR-0033 补记）。
+	 */
+	setLookRoots(roots: readonly string[]): void {
+		this.lookRoots = [...roots];
+		this.refreshPrompt();
+	}
+
+	/** 同上，换掉「她能写哪几个文件夹」。他新放开一个写的地方时调一次。 */
+	setWriteRoots(roots: readonly string[]): void {
+		this.writeRoots = [...roots];
+		this.shellRoots = [...roots];
+		this.refreshPrompt();
+	}
+
+	/** 同上，只换「她能跑命令哪几个文件夹」；一般不用单独调，跟着写的那本账走。 */
+	setShellRoots(roots: readonly string[]): void {
+		this.shellRoots = [...roots];
+		this.refreshPrompt();
+	}
+
 	/** 用最新的状态与记忆重编 system prompt；会话历史保留。 */
 	refreshPrompt(): void {
 		const system = createInitialSystemMessage(
@@ -574,6 +618,26 @@ export class IrisSession {
 	 * 上一轮还在跑就先等它收尾（要打断用 `interrupt()`）。
 	 */
 	async say(input: string, hooks: IrisSessionHooks = {}): Promise<IrisTurn> {
+		return await this.runTurn(input, hooks, false);
+	}
+
+	/**
+	 * 她自己开口（ADR-0037）：没人跟她说话，但她想说了。
+	 *
+	 * 为什么不走 `agent.continue()`：pi 在「最后一条是 assistant」时直接抛
+	 * `Cannot continue from message role: assistant`（实测 0 ms），所以主动说话
+	 * 只能伪造一条 user 消息。这条 cue 留在 transcript 里（刻意的：下次她看见自己
+	 * 说过的话，得知道当时是因为什么说的），但不进原文归档——那不是对方说的话。
+	 */
+	async speakUp(hint = "", hooks: IrisSessionHooks = {}): Promise<IrisTurn> {
+		const tail =
+			hint.trim() === ""
+				? "他没在跟你说话。你刚瞥了一眼他屏幕上在做什么，看到值得说的就自己说一句；没什么好说的就别出声。"
+				: hint.trim();
+		return await this.runTurn(SELF_START + tail + "）", hooks, true);
+	}
+
+	private async runTurn(input: string, hooks: IrisSessionHooks, internal: boolean): Promise<IrisTurn> {
 		if (this.agent.state.isStreaming) await this.agent.waitForIdle();
 		// 跨夜了就把日期那一行换掉，否则第二天她还拿着昨天的 prompt 说今天（实测把周二说成周四）。
 		if (this.promptDay !== dayStamp(this.clock())) this.refreshPrompt();
@@ -677,7 +741,7 @@ export class IrisSession {
 			lastInteractionAt: at,
 		};
 
-		if (this.memory !== null) {
+		if (this.memory !== null && !internal) {
 			this.turns += 1;
 			const episode: Episode = {
 				id: `turn-${at}-${this.turns}`,
@@ -691,12 +755,12 @@ export class IrisSession {
 			turn.episode = episode;
 		}
 
-		this.archiveTurn(input, text, at);
+		// 主动开口不落归档：那不是对方说的话，接回历史时也对不上（ADR-0037）。
+		if (!internal) this.archiveTurn(input, text, at);
 		this.lastReply = text;
 		// 下一轮的「信封」：上一句说了什么、调了几次工具、活干完没有。
 		this.lastInput = input;
 		this.lastToolCalls = this.toolCallsThisTurn;
-		this.lastToolErrors = this.toolErrorsThisTurn;
 		this.lastUnfinished = this.toolErrorsThisTurn > 0 || message.stopReason !== "stop";
 		emit({ type: "turn_end", turn });
 		this.hook = null;
@@ -841,13 +905,25 @@ export class IrisSession {
 		return restored;
 	}
 
-	/** 手上有只读文件三件里的任何一件（ADR-0026）。 */
+	/** 手上有私信那两件（ADR-0029）。 */
 	private hasDmTools(): boolean {
 		return this.toolNames.has("douyin_im") || this.toolNames.has("douyin_dm");
 	}
 
+	/** 手上有只读文件三件里的任何一件（ADR-0026）。 */
 	private hasFileTools(): boolean {
 		return this.toolNames.has("ls") || this.toolNames.has("read") || this.toolNames.has("grep");
+	}
+
+	/** 手上有写工具（ADR-0034）；只给 request_write 也算，她会开口要。 */
+	private hasWriteTools(): boolean {
+		return (
+			this.toolNames.has("write_file") ||
+			this.toolNames.has("append_file") ||
+			this.toolNames.has("make_dir") ||
+			this.toolNames.has("move_path") ||
+			this.toolNames.has("request_write")
+		);
 	}
 
 	private buildPrompt(): string {
@@ -872,6 +948,12 @@ export class IrisSession {
 			...(this.toolNames.has("douyin_feed") ? { canWatch: true } : {}),
 			...(this.hasDmTools() ? { canDm: true, dmNames: this.dmNames } : {}),
 			...(this.hasFileTools() && this.lookRoots.length > 0 ? { lookRoots: this.lookRoots } : {}),
+			...(this.hasWriteTools() ? { canWrite: true } : {}),
+			...(this.hasWriteTools() && this.writeRoots.length > 0 ? { writeRoots: this.writeRoots } : {}),
+			...(this.toolNames.has("look_at_screen") ? { canSee: true } : {}),
+			...(this.toolNames.has("look_at_screen") && this.perception !== undefined ? { perception: true } : {}),
+			...(this.toolNames.has("run_command") ? { canShell: true } : {}),
+			...(this.toolNames.has("run_command") && this.shellRoots.length > 0 ? { shellRoots: this.shellRoots } : {}),
 			now,
 		});
 	}
@@ -932,7 +1014,19 @@ export class IrisSession {
 		const last = messages.length - 1;
 		const cleaned = messages.map((message, index) => (index === last ? message : stripNudge(message)));
 		const compacted = this.compactor === null ? cleaned : await this.compactor.compact(cleaned);
-		return stampMoment(compacted, momentNote(this.clock()));
+		return stampMoment(compacted, momentNote(this.clock()) + this.perceptionNote());
+	}
+
+	/** 感知层那一行；没接、或者还没看到过就什么都不加。 */
+	private perceptionNote(): string {
+		if (this.perception === undefined) return "";
+		try {
+			const line = this.perception();
+			if (line === null || line.trim().length === 0) return "";
+			return "\n（" + line.trim() + "）";
+		} catch {
+			return "";
+		}
 	}
 
 	/**

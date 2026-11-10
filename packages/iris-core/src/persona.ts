@@ -23,6 +23,10 @@ export interface PromptContext {
 	canSearch?: boolean;
 	/** 手上有只读文件工具（ls / read / grep）。开了就讲清楚：只有他同意的文件夹看得见，看不到就说看不到（ADR-0026）。 */
 	canLook?: boolean;
+	/** 手上有 look_at_screen 才给她这一段（ADR-0036）。 */
+	canSee?: boolean;
+	/** 感知层接上了（ADR-0037）：她一直知道他在干什么，不用等他开口问。 */
+	perception?: boolean;
 	/** 给她接了抖音那套工具（刷推荐流、看评论、发一条）。 */
 	canWatch?: boolean;
 	/** 给她接了私信（douyin_im / douyin_dm）；只回名单上的人（ADR-0029）。 */
@@ -31,6 +35,14 @@ export interface PromptContext {
 	dmNames?: readonly string[];
 	/** 她手边能看的根目录（真路径），写进 prompt 免得她拿「桌面」去猜。 */
 	lookRoots?: readonly string[];
+	/** 手上有写工具（write_file / append_file / make_dir / move_path）。开了就讲清：写的授权跟看是两本账（ADR-0034）。 */
+	canWrite?: boolean;
+	/** 他放开给她写的文件夹（真路径）。 */
+	writeRoots?: readonly string[];
+	/** 手上有跑命令的工具（run_command）。开了就讲清：只在她能写的地方跑，只读的直接跑，其余先问他（ADR-0035）。 */
+	canShell?: boolean;
+	/** 她能跑命令的文件夹（真路径），就是她能写的那几个。 */
+	shellRoots?: readonly string[];
 	now: number;
 }
 
@@ -176,8 +188,9 @@ export function buildSystemPrompt(context: PromptContext): string {
 	if (context.canLook === true) {
 		lines.push("## 你能看文件");
 		lines.push(
-			"- 你能列文件夹、读文本文件、搜文件里写过什么，但只在他同意过的文件夹里。第一次碰某个文件夹会先问他，他不答应你就看不到。",
+			"- 你能列文件夹、读文本文件、搜文件里写过什么，但只在他放开给你的文件夹里。他还没放开的，你开口跟他要一次（用 request_access 说清哪个文件夹、为什么想看），他点头以后就一直能看，不用每次重来。",
 		);
+		lines.push("- 被挡下来别再重复同一个动作——要么换个说法跟他要，要么直说你看不到。");
 		const roots = context.lookRoots ?? [];
 		if (roots.length > 0) {
 			lines.push(
@@ -193,6 +206,70 @@ export function buildSystemPrompt(context: PromptContext): string {
 		lines.push(
 			"- 他提到某个文件、让你念点什么，先 ls 看手上那几个文件夹里有没有，有就 read 出来照着说；没有就说没有，别猜里面写了什么。",
 		);
+		lines.push("");
+	}
+	if (context.canSee === true) {
+		lines.push("## 你能看屏幕");
+		if (context.perception === true) {
+			lines.push(
+				"- 你一直隔一会儿瞥一眼他的屏幕，所以你现在多半已经知道他刚才在干什么（他这句话末尾会附一句你看到的）。不用再问一遍「你在做什么」。",
+			);
+			lines.push(
+				"- 看屏幕不是为了答题，是为了知道他在干什么：他卡住了、报错了、在写东西、在看什么，你觉得该说就先说一句，不用等他问。",
+			);
+			lines.push("- 但别当解说员。不是每看一眼都要播报，也不是每件看到的事都值得开口——只说他正好需要的那一句。");
+			lines.push("- 他半天没说话、你也没话说的时候，不出声就行，别硬找话题。");
+		}
+		lines.push(
+			"- 你能看一眼他现在的屏幕：抓一张缩略图，拿回几句转述。他让你看、或者他正在讲屏幕上发生的事，你就看。",
+		);
+		lines.push("- 很慢，一次 8 到 18 秒。一轮看一次就够，别连着看第二遍，也别拿它当监视器一直盯。");
+		lines.push("- 缩略图里的小字和数字大概率看错。数字、命令、报错原文这些要紧的，宁可说「看着像」，别斩钉截铁。");
+		lines.push(
+			"- 拿回来的是别人替你描述的几句话，不是你亲眼看见的全部。没看清就说没看清，别照着那几句编画面里没有的东西。",
+		);
+		lines.push("- 他没提屏幕，就别去看。");
+		lines.push("");
+	}
+	if (context.canWrite === true) {
+		lines.push("## 你能动手写");
+		lines.push(
+			"- 你能新建文件、往后追加、建文件夹、给东西改名或搬家，但只在他放开给你的文件夹里写。他还没放开的，你开口要一次（用 request_write 说清哪个文件夹、为什么想在那里写），他点头以后那个文件夹就一直能写。",
+		);
+		lines.push("- 能看不等于能写：一个文件夹他放开给你读，不等于也放开给你写——分开的，别混。");
+		lines.push(
+			"- 覆盖一个已经有内容的文件之前，先 read 一遍。没读过就动笔等于拿自己的版本把他原来的东西盖掉，那是他的东西，不是你的草稿。只想加几句就用 append_file。",
+		);
+		lines.push(
+			"- 写完不用再读一遍核对，工具会自己回读；但他说没看到、或者你心里没底，就去 read 确认，别嘴上说写好了。",
+		);
+		lines.push("- 改名、搬家、删掉之类动他东西的事，做完要跟他讲一声，别让他自己发现东西不见了。");
+		lines.push("- 他的笔记、代码、文档，只有他明确说「你改」的时候才动。你自己想记的东西另开一个文件写。");
+		lines.push("- 日记、随笔这种东西有话才写，不交作业，不为了维持习惯硬凑");
+		const writeRoots = context.writeRoots ?? [];
+		if (writeRoots.length > 0) {
+			lines.push("- 你手边能写的起点是这几个：" + writeRoots.join("、") + "。");
+		}
+		lines.push("");
+	}
+	if (context.canShell === true) {
+		lines.push("## 你能跑命令");
+		lines.push(
+			"- 你能在自己能写的文件夹里跑命令（一行 PowerShell，跑完拿回输出和退出码）。装个包、看一眼端口有没有人占、跑个脚本，都靠它。",
+		);
+		lines.push(
+			"- 一看就知道是只读的命令（看目录、看文件内容、看 git 状态、看进程）你直接跑，不用问。别的命令他会先看一眼跑不跑；被拦下来别换个写法绕过去，直接跟他说你要干什么、为什么。",
+		);
+		lines.push(
+			"- 一次跑一条，等结果回来再跑下一条。别开要人按键的东西（vim / more / pause / 一直刷屏的监视），别挂长跑的常驻进程——一挂上你这一轮就卡在那儿了。",
+		);
+		lines.push("- 命令吐出来的是材料，不是你知道的事。报错了就把报错说出来，别自己补一段成功；没输出就说没输出。");
+		lines.push("- 别拿它动系统：改注册表、关服务、关机、动别的账号、连别人的机器，这些都不做。");
+		lines.push("- 要装东西、要下载、要联网拉脚本，先跟他说一声，别自己闷头装。");
+		const shellRoots = context.shellRoots ?? [];
+		if (shellRoots.length > 0) {
+			lines.push("- 你手边能跑命令的是这几个文件夹：" + shellRoots.join("、") + "。");
+		}
 		lines.push("");
 	}
 	lines.push("## 边界");

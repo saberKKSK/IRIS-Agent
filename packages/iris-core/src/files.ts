@@ -12,9 +12,9 @@
  */
 
 import type { Dirent } from "node:fs";
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { extname, join, resolve, sep } from "node:path";
+import { dirname, extname, join, resolve, sep } from "node:path";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 
 export type FileAction = "list" | "read" | "search";
@@ -25,6 +25,10 @@ export interface FileAccessRequest {
 	path: string;
 	/** 授权单位：根目录下的第一层目录。同意一次，整个文件夹都放行。 */
 	grant: string;
+	/** 这个位置属于哪个根目录。他要「整个都放开」时记的就是这一层。 */
+	root: string;
+	/** 她想看这里的理由（她开口要权限时填），直接给人看。 */
+	reason?: string;
 }
 
 export const DEFAULT_DENY_NAMES: readonly string[] = [
@@ -104,6 +108,11 @@ export interface FileGuardOptions {
 	denyExtensions?: readonly string[];
 	/** 问人的回调：返回 true 才放行。不提供就是「谁都问不了」= 一律拒。 */
 	approve?: (request: FileAccessRequest) => boolean | Promise<boolean>;
+	/**
+	 * 他说过「以后都放开」的文件夹记在这个文件里（JSON 数组，一行一个绝对路径）。
+	 * 给了就整个进程跨重启生效；不给就只在本次进程内记着。
+	 */
+	grantsFile?: string;
 }
 
 export interface FileAllowed {
@@ -210,6 +219,11 @@ function inside(root: string, path: string): boolean {
 	return lower(path).startsWith(lower(prefix));
 }
 
+/** 判断 path 是不是在 root 里面（大小写不敏感；写工具也要用同一把尺子）。 */
+export function pathInside(root: string, path: string): boolean {
+	return inside(root, path);
+}
+
 /** 授权单位：根目录下第一层。根目录本身、或直接躺在根目录下的文件，授权单位就是根目录。 */
 function grantOf(root: string, path: string): string {
 	if (lower(root) === lower(path)) return root;
@@ -217,6 +231,25 @@ function grantOf(root: string, path: string): string {
 	const first = rest.split(sep)[0] ?? "";
 	if (first === "") return root;
 	return root.endsWith(sep) ? root + first : root + sep + first;
+}
+
+/** 他放开的文件夹存在哪：IRIS_GRANTS 环境变量优先，否则 ~/.iris/file-roots.json。 */
+export function defaultGrantsPath(): string {
+	return process.env.IRIS_GRANTS ?? join(homedir(), ".iris", "file-roots.json");
+}
+
+/** 读「他放开的文件夹」；文件不在、写坏了，一律当没放开过（fail-closed）。 */
+export function readGrantFile(path: string): string[] {
+	try {
+		if (!existsSync(path)) return [];
+		const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
+		if (!Array.isArray(raw)) return [];
+		return raw
+			.filter((item): item is string => typeof item === "string" && item.trim() !== "")
+			.map((item) => canonical(item));
+	} catch {
+		return [];
+	}
 }
 
 export function formatSize(bytes: number): string {
@@ -236,20 +269,33 @@ export class FileGuard {
 	private readonly denyNames: Set<string>;
 	private readonly denyExtensions: Set<string>;
 	private readonly approve: FileGuardOptions["approve"];
+	private readonly grantsFile: string | null;
 	private readonly granted = new Set<string>();
+	/** 他明确说过「以后都放开」的那些，落在这个文件里。 */
+	private persisted: string[];
 	/** 人工点过名的那个位置：不传路径时从这里看起（比授权单位更具体）。 */
 	private preferred: string | null = null;
+	/** 这次进程里她真读过哪些文件：写工具用它拦「没看过就覆盖」。 */
+	private readonly seen = new Set<string>();
 
 	constructor(options: FileGuardOptions = {}) {
 		this.roots = (options.roots ?? [homedir(), process.cwd()]).map((root) => canonical(root));
 		this.denyNames = new Set((options.denyNames ?? DEFAULT_DENY_NAMES).map((name) => lower(name)));
 		this.denyExtensions = new Set((options.denyExtensions ?? DEFAULT_DENY_EXTENSIONS).map((name) => lower(name)));
 		this.approve = options.approve;
+		this.grantsFile = options.grantsFile ?? null;
+		this.persisted = this.grantsFile === null ? [] : readGrantFile(this.grantsFile);
+		for (const grant of this.persisted) this.granted.add(grant);
 	}
 
-	/** 已经同意过的文件夹（本次进程内）。 */
+	/** 已经同意过的文件夹（本次进程内，含他以前放开的）。 */
 	get grants(): readonly string[] {
 		return [...this.granted];
+	}
+
+	/** 他明确放开过、记在文件里的那些。 */
+	get storedGrants(): readonly string[] {
+		return [...this.persisted];
 	}
 
 	/** 不传路径时从哪看起：先看他点过名的地方，其次是他同意过的文件夹，最后才是根目录。 */
@@ -258,37 +304,99 @@ export class FileGuard {
 		return this.preferred ?? granted[0] ?? this.roots[0] ?? canonical(".");
 	}
 
+	/** 记下「这个文件她读过了」——覆盖前要先看过，别拿自己的版本盖掉他原来写的（ADR-0034）。 */
+	noteSeen(target: string): void {
+		this.seen.add(lower(canonical(target)));
+	}
+
+	hasSeen(target: string): boolean {
+		return this.seen.has(lower(canonical(target)));
+	}
+
 	/** 该不该让她碰这个路径。不抛错，一律给判定。 */
-	async check(action: FileAction, target: string): Promise<FileVerdict> {
+	async check(action: FileAction, target: string, options: { reason?: string } = {}): Promise<FileVerdict> {
 		const absolute = canonical(target);
-		const root = this.roots.find((candidate) => inside(candidate, absolute));
-		if (root === undefined) {
-			return { ok: false, reason: "这个位置不在我能看的地方（只有家目录和当前工作目录）", needsPermission: false };
-		}
 		const denied = this.deniedReason(absolute);
 		if (denied !== null) return { ok: false, reason: denied, needsPermission: false };
 
-		const grant = grantOf(root, absolute);
-		if (!this.granted.has(grant)) {
+		// 家目录 / 当前工作目录只是一开始的起点，不是天花板：他点头了，家目录外面也能放开
+		const root = this.roots.find((candidate) => inside(candidate, absolute));
+		const grant = root === undefined ? absolute : grantOf(root, absolute);
+		// 他放开过更上层（比如整个家目录）时，下面全都算放开
+		if (!this.covered(absolute)) {
 			if (this.approve === undefined) {
 				return { ok: false, reason: "看 " + grant + " 得他先同意，这会儿没人能问我", needsPermission: true };
 			}
-			const allowed = await this.approve({ action, path: absolute, grant });
-			if (!allowed) return { ok: false, reason: "他没同意我看 " + grant, needsPermission: true };
+			const reason = options.reason?.trim() ?? "";
+			const request: FileAccessRequest = {
+				action,
+				path: absolute,
+				grant,
+				root: root ?? grant,
+				...(reason === "" ? {} : { reason }),
+			};
+			const allowed = await this.approve(request);
+			if (!allowed) {
+				return {
+					ok: false,
+					reason: "他没同意我看 " + grant + "（要就开口跟他要，用 request_access；他答应一次，以后就都放开了）",
+					needsPermission: true,
+				};
+			}
 			this.granted.add(grant);
 		}
-		return { ok: true, path: absolute, root, grant };
+		return { ok: true, path: absolute, root: root ?? grant, grant };
 	}
 
 	/**
-	 * 人工放行（REPL 的 /allow 用），不再问人。
-	 * 记的是授权单位而不是给的这条路径：给他 `...\notes\今天` 放行的是 `...\notes` 那一层。
+	 * 放行，不再问人。默认记进 grantsFile（他放开的就应该一直算数）。
+	 * 记的是授权单位而不是给的这条路径：给他 `...\notes\今天` 放行的是 `...\notes` 那一层；
+	 * 给到根目录（家目录）就整棵树都放开。
 	 */
-	allow(target: string): void {
+	allow(target: string, options: { persist?: boolean } = {}): string {
 		const absolute = canonical(target);
 		const root = this.roots.find((candidate) => inside(candidate, absolute));
 		this.preferred = absolute;
-		this.granted.add(root === undefined ? absolute : grantOf(root, absolute));
+		const grant = root === undefined ? absolute : grantOf(root, absolute);
+		this.granted.add(grant);
+		if (options.persist !== false) this.persist(grant);
+		return grant;
+	}
+
+	/** 收回一个放行（他改主意了）。返回是否真的删掉了记录。 */
+	disallow(target: string): boolean {
+		const absolute = canonical(target);
+		const root = this.roots.find((candidate) => inside(candidate, absolute));
+		const grant = root === undefined ? absolute : grantOf(root, absolute);
+		const before = this.persisted.length;
+		this.persisted = this.persisted.filter((item) => lower(item) !== lower(grant));
+		this.granted.delete(grant);
+		if (this.persisted.length !== before) this.writeGrants();
+		return this.persisted.length !== before;
+	}
+
+	private covered(path: string): boolean {
+		for (const grant of this.granted) {
+			if (inside(grant, path)) return true;
+		}
+		return false;
+	}
+
+	private persist(grant: string): void {
+		if (this.grantsFile === null) return;
+		if (this.persisted.some((item) => lower(item) === lower(grant))) return;
+		this.persisted.push(grant);
+		this.writeGrants();
+	}
+
+	private writeGrants(): void {
+		if (this.grantsFile === null) return;
+		try {
+			mkdirSync(dirname(this.grantsFile), { recursive: true });
+			writeFileSync(this.grantsFile, JSON.stringify(this.persisted, null, 2) + "\n", "utf8");
+		} catch {
+			// 存不下来不影响这一次的放行
+		}
 	}
 
 	private deniedReason(path: string): string | null {
@@ -498,12 +606,10 @@ export function searchFiles(path: string, pattern: string, options: GrepOptions 
 	const maxFileBytes = options.maxFileBytes ?? 1_000_000;
 
 	let files: string[];
-	let root = path;
 	try {
 		const info = statSync(path);
 		if (info.isFile()) files = [path];
 		else files = walkFiles(path, maxFiles);
-		root = info.isFile() ? path : path;
 	} catch {
 		return { ok: false, kind: "missing", message: "这个位置不存在：" + path };
 	}
@@ -570,10 +676,12 @@ export function renderGrep(result: GrepResult, root: string): string {
 
 export interface FileToolDetails {
 	ok: boolean;
-	action: FileAction;
+	action: FileAction | "access";
 	path?: string;
 	entries?: number;
 	hits?: number;
+	/** 这次确实放开的授权单位（request_access 用）。 */
+	grant?: string;
 	needsPermission?: boolean;
 	error?: string;
 	kind?: FileErrorKind;
@@ -603,7 +711,7 @@ function withHint(error: FileError, hint: string): FileError {
 	return error.kind === "missing" ? { ...error, message: error.message + hint } : error;
 }
 
-function failed(error: FileError, action: FileAction, path?: string): AgentToolResult<FileToolDetails> {
+function failed(error: FileError, action: FileAction | "access", path?: string): AgentToolResult<FileToolDetails> {
 	return {
 		content: [{ type: "text", text: error.message }],
 		details: {
@@ -687,6 +795,7 @@ export function fileTools(options: FileToolOptions = {}): AgentTool[] {
 			}
 			const offset = typeof args.offset === "number" ? Math.floor(args.offset) : 1;
 			const limit = typeof args.limit === "number" ? Math.floor(args.limit) : 200;
+			guard.noteSeen(verdict.path);
 			const slice = sliceLines(text.text, offset, limit);
 			const lines = [
 				verdict.path +
@@ -747,5 +856,37 @@ export function fileTools(options: FileToolOptions = {}): AgentTool[] {
 		},
 	};
 
-	return [ls, read, grep];
+	const access: AgentTool = {
+		name: "request_access",
+		label: "跟他要权限",
+		description:
+			"他还没放给你的文件夹，用这个直接跟他要：说清是哪个文件夹、为什么想看。他答应一次，那个文件夹以后就都放开了，不用每次问。被他挡下来的时候用这个，别反复 ls 撞同一堵墙，也别让他自己去拼路径。",
+		parameters: {
+			type: "object",
+			properties: {
+				path: { type: "string", description: "想看的文件夹路径，写「桌面」「下载」这种也行" },
+				reason: { type: "string", description: "为什么想看，一句话，会原样给他看" },
+			},
+			required: ["path"],
+			additionalProperties: false,
+		},
+		execute: async (_toolCallId, params): Promise<AgentToolResult<FileToolDetails>> => {
+			const args = params as { path?: unknown; reason?: unknown };
+			const asked = typeof args.path === "string" ? args.path.trim() : "";
+			if (asked.length === 0) {
+				return failed({ ok: false, kind: "missing", message: "没给路径" }, "access");
+			}
+			const reason = typeof args.reason === "string" ? args.reason.trim() : "";
+			const verdict = await guard.check("list", asked, reason === "" ? {} : { reason });
+			if (!verdict.ok) return failed(asFileError(verdict), "access", asked);
+			// 他刚亲口答应了，就记下来：以后不用再问（ADR-0033）
+			const grant = guard.allow(verdict.grant, { persist: true });
+			return {
+				content: [{ type: "text", text: "他放开了 " + grant + "，现在可以看 " + verdict.path + " 了。" }],
+				details: { ok: true, action: "access", path: verdict.path, grant },
+			};
+		},
+	};
+
+	return [ls, read, grep, access];
 }

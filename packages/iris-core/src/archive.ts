@@ -14,7 +14,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { StyleProfile } from "./style.ts";
-import type { Episode, EpisodeKind } from "./types.ts";
+import type { EpisodeKind } from "./types.ts";
 
 export type Tier = "ordinary" | "medium" | "critical";
 /**

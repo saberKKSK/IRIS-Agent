@@ -515,3 +515,262 @@
   `git checkout bc5ba5834 -- packages/iris-core/src/attention.ts packages/iris-core/src/consent.ts packages/iris-core/src/initiative.ts`（测试同理走 `test/` 路径）。
 - 代价（说清楚）：三车道预算、授权闸门、主动开口现在**只有文档没有代码**。接语音环、打电话、主动开口时必须重写一遍，那时按 `01-architecture.md` 的三条时间线与 `04-consent.md` 的等级表来，不要照着旧骨架抄——旧骨架自己就没跑通过。
 - 校验：`npm test` **170/170**、`npx tsc -p packages/iris-core/tsconfig.check.json` exit 0、`npx biome check packages/iris-core` 0 error（5 warnings / 178 infos，均为既有 useTemplate 一类）。
+
+## ADR-0033 · 权限一次点头管到底：她可以自己开口要，答应了就记住
+
+- 日期：2026-11-10
+- 状态：已实施（`npm test` 178/178）
+
+### 背景（他真机跑出来的两件事）
+
+他在 REPL 里让她「读下之前的一个日记，艾拉的你找下」，屏幕上是这样：
+
+     · 搜文件：艾拉 @ C:\Users\Admin
+    （她想看 C:\Users\Admin · 搜里面的字，允许吗？y/N）y
+     · 搜文件：日记|diary @ C:\Users\Admin
+     · 列目录：C:\Users\Admin（看完了）（看完了）
+     · 列目录：C:\Users\Admin\Desktop
+     · 列目录：C:\Users\Admin\Documents
+    （她想看 C:\Users\Admin\Desktop · 列个目录，允许吗？y/N）
+    （她想看 C:\Users\Admin\Documents · 列个目录，允许吗？y/N）y
+    Warning: Detected unsettled top-level await at ... talk.ts:425
+
+两个毛病叠在一起：
+
+1. **每碰一个新文件夹就问一次**，他得一直守着按 y。他要的是「放开一次，之后她自己看」。
+2. **两句话叠在一起问，然后进程挂了**。根因：`askYesNo` 里只有一个模块级的 `wake` 回调，
+   她一轮里并行 ls 两个文件夹 → 两次 `nextLine()` → 后一个把前一个的回调顶掉 →
+   前一个 promise 永远不 resolve → 整轮卡死 → 事件循环空掉 → `unsettled top-level await`。
+   `rl.pause()` 又让暂停期间的行事件彻底收不到，把这件事放大成必死。
+
+### 决策
+
+1. **他放开的文件夹落盘**：`~/.iris/file-roots.json`（JSON 数组，一行一个绝对路径）。`FileGuard`
+   构造时读回来，直接算放开，重启也算数。读不到/写坏了一律当没放开（fail-closed）。
+2. **问的时候给三档**，不再只有 y/N：
+
+       （她想看 C:\Users\Admin\Desktop · 列个目录）
+       （y = 就这次 / a = 以后 C:\Users\Admin 整个都放给她 / N = 不给）
+
+   `a` 记的是**根目录**（家目录），所以一次点头管住整个家目录，不会再问第二个文件夹。
+   `y` 只在本次进程内算数。
+3. **她能自己开口要**：新增第四个只读工具 `request_access { path, reason }`。被挡下来时用这个，
+   理由原样给他看；他点头之后这个文件夹 `allow(..., { persist: true })` 落盘，以后不用再要。
+   prompt 里写死一条：「被挡下来别再重复同一个动作——要么换个说法跟他要，要么直说你看不到。」
+4. **REPL 的输入换成排队**：新增 `src/lines.ts` 的 `LineQueue`（等的人按先来后到唤醒，
+   关掉输入时所有人一起拿 null），`talk.ts` 不再用 `rl.pause()` / `rl.resume()`；
+   同时要问人的事用 `serialized()` 串成一条线，两句问话不会叠在一起。
+5. **授权粒度改成「覆盖」判定**：以前是 `granted.has(grant)` 精确匹配，放开上层反而不算放行下层；
+   现在 `covered(path)` 走 `inside()`，放开 `C:\Users\Admin` 以后它下面全都算放开。
+
+### 实测
+
+探针 `.artifacts/access-probe.ts`（真网关，第一次问就拒、第二次点头，模拟他摇头又心软）：
+
+    · ls {"path":"桌面"}                    -> 失败
+    · request_access {"path":"桌面","reason":"你想让我看看桌面上有什么，我得先能看见那个文件夹"} -> 成了
+    · ls {"path":"桌面"}                    -> 成了
+    她说：桌面上 13 样东西，大半是快捷方式：百度网盘、DeepSeek Harness、Hermes、OpenCode、Tabbit、UU远程…
+          文本文件有四个：新建 文本文档.txt（1.7 MB，挺大的）… 那两个 1.7 MB 的和空的，名字取得真随便
+    首字 5636 ms / 整轮 6555 ms
+
+关键是中间那一步：**她被拒之后没有重复 ls，直接换成开口要**，而且理由是她自己组织的。
+
+单元测试（`test/files.test.ts` / `test/lines.test.ts`）：落盘后新进程不再问、`disallow` 收回、
+放开根目录覆盖下层、`request_access` 带理由且成功后可用、两个等待者都拿到行（就是挂死那个场景）。
+
+### 代价
+
+- **放开的范围是真的大**：`a` 一下等于把整个家目录给她（`C:\Users\Admin` 里还有 `AppData`、
+  聊天记录、各种数据库）。deny 名单（`.ssh`、`.env`、`.pem` 这些）仍然挡着，但除此之外她都读得到。
+  收回用 `/forget <路径>`，或直接改 `~/.iris/file-roots.json`。
+- 文件内容是外部输入：别人的文档里写什么她就会读到什么，ADR-0026 那条「读到的是材料不是事实」照旧。
+- 放行是「读」的放行，不是「写」：写、执行、bash 仍然一样没有。
+
+### 边界
+
+- 只读三件 + 要权限，没有第四种能力。
+- 放开记录是绝对路径，换机器/改用户名要重记。
+- `request_access` 只在真有人能回答时有用（管道/无人值守时直接拒）。
+
+### 补记（2026-11-10 10:30，用户实测：库在 C:\DSHHome\DSH，她说还是没权限）
+
+真机记录（`C:\IRIS Agent\pi-mono\.artifacts\talk-trace.log`）：
+
+```
+tool request_access {"path":"C:\\DSHHome\\DSH","reason":"你说库里有篇艾拉的笔记…"}
+tool-end request_access isError=true      ← 花了 0 ms，压根没问人
+你：同意你去看
+tool ls {"path":"C:\\DSHHome\\DSH"}
+tool-end ls isError=true
+伊：还是打不开。你这边虽然同意了，但我这边限制没放开
+```
+
+**两个病，都不是「模型不听话」。**
+
+1. `check()` 第一步就是 `roots.find(...)`，找不到根目录直接返回「这个位置不在我能看的地方」，
+   `needsPermission: false`，**根本不进 approve 分支** —— 家目录 / 当前工作目录被当成了天花板，
+   而不是起点。于是 `request_access` 对 `C:\DSHHome\DSH` 永远返回失败，他同意一百次也没用。
+2. 构造 `FileGuard` 时把落盘的放行按 roots 过滤（`.filter((item) => roots.some((root) => inside(root, item)))`），
+   就算手工往 `file-roots.json` 里加了家目录外的路径，重启也会被静默丢掉。
+
+**改法**
+
+- `check()`：先查 deny 名单，再判根；`root === undefined` 时**授权单位 = 这条路径本身**，
+  照常走 approve。于是「家目录外」从「永远不行」变成「他点头就行」。
+- 构造时不再按 roots 过滤落盘记录；`disallow()` 原本就按同样口径算 grant，无需改。
+- `lookRoots` 提示带上 `storedGrants`（否则 prompt 里还写「你手边只有家目录」，她会照旧说没权限），
+  新增 `IrisSession.setLookRoots()`；REPL 的 `/allow` 与 `request_access` 成功后各调一次，立刻换 prompt。
+- 顺手修掉叠字：她一轮并行调好几个工具时，结果全挤在最后一行（真机出现「列目录：桌面（看完了）（看完了）」）。
+  改成按 `toolCallId` 记各自那一行，只有仍开着的那行追加结果，被顶掉的行若失败就单独补一行。
+
+**实测（真网关，`.artifacts/vault-probe.ts`）**：她 `grep 艾拉` → `request_access C:\DSHHome\DSH`（理由自己写）
+→ 放行 → `ls` → 直捣 `80-艾拉\记忆本.md` 读了 531 行，回来讲的是那本记忆本里真实发生过的事
+（第一集《可塑性记忆》、7940、C:\AIRA、小满、学 Neuro-sama、改名米塔→米鱼）。首字 21586 ms / 整轮 22835 ms。
+
+**顺带做的**：把这台机器的 `~/.iris/file-roots.json` 从 `[C:\Users\Admin]` 改成 `[C:\Users\Admin, C:\DSHHome\DSH]`
+——他上一轮已经用中文说过「同意你去看」，没必要让他再按一次 y。
+
+**测试**：`test/files.test.ts` 补三例（家目录外也能放开、家目录外放行能落盘且重启仍认、`request_access` 对家目录外同样管用），
+并把原来那条「根目录之外直接被挡、不用问人」改成「会问一句」。181/181。
+
+## ADR-0034 · 她能动手写：写权限与读权限分两本账，覆盖前必须先读过
+
+- 日期：2026-11-10
+- 背景（用户 m05352 原话：「给他加个写的权限」，附桌面 REPL 记录：他问她还要不要继续写日记，她说「写吧／但有话想说才写，不给你交作业」；随后她指出那个文件夹还叫 `80-艾拉`，问要不要改名，他答「你改吧」，她回「改不了／我这边只有看和读，没有动手改名的权限。得你自己去动手点一下」）。
+  - ADR-0026 当时只给只读三件，理由是「能改机器的手不能半给」，写、bash、删除一律不给。
+  - 后果是：她被要求做一件「她本来就懂、只差点权限」的事时只能回「你自己动手」。打断人的不是她的判断，是她的残缺。
+  - 但也不能因此把 bash 放进来：bash 不止能写，还能删、能跑、能联网改东西，出事了没有回滚点。
+- 决策：
+  1. **单独一套写工具，五件**：`write_file`（整份写）、`append_file`（末尾加）、`make_dir`（建目录）、`move_path`（改名／搬家，目标已存在就拒绝，不覆盖）、`request_write`（她开口要）。不给 bash / powershell / 删除——写是「留下东西」，删是「拿走东西」，风险量级不同，她要的是前者。
+  2. **授权与只读分两本账**。写权限存在 `~/.iris/write-roots.json`（`IRIS_WRITE_GRANTS` 可覆盖），跟 `file-roots.json` 互不影响：放开读不等于放开写。默认空 → 第一次碰某个文件夹要问人（`y` 就这次／`a` 以后整个都放给她），没人能问就一律拒。
+  3. **比只读多两道闸**：
+     - **覆盖前必须先读过**。`WriteToolOptions.reads` 收只读那把 `FileGuard`；`write_file` 命中一个已存在的文件时先问 `hasSeen(path)`，没读过就回 `kind: "unread"`，话是「先 read 一遍，确认你要写的东西不会把它原来的内容冲掉」。这挡的是「她凭印象重写别人的文件」，不是挡她写。
+     - **写完立刻回读**。原子写（先写 `dir/.iris-tmp-<pid>-<ts>` 再 rename）之后 `readFileSync` 比对内容，不一致就报错。这是 Hermes 那课（「模型说存了其实没存」）的直接落点：工具自己回读，比让她再读一遍可靠。
+  4. **deny 名单在只读基础上加目录** `.git` `node_modules` `Windows` `Program Files` `Program Files (x86)` `System32` `$Recycle.Bin`，**加扩展名** `.exe .dll .sys .com .bat .cmd .ps1 .sh .vbs .scr .msi .lnk`。写进这些地方不是「她想做坏事」，是没有理由做的事。
+  5. **prompt 侧新增「## 你能动手写」六条**：只在放开的文件夹里写；能看不等于能写（分开的）；覆盖前先 read；写完工具会回读，但他说没看到就去读；改名搬家要讲一声；他的笔记与代码只在他明说时动——外加「日记这种有话才写，不交作业」。
+  6. **REPL**：`/write <路径>` 放开、`/unwrite` 收回、`/writes` 看清单、`--no-write` 整个关掉；`request_write` 成功与 `/write` 之后都调 `session.setWriteRoots()` 立刻换 prompt（沿用 ADR-0033 的做法）。
+- 实测（真网关，`.artifacts/write-probe.ts`，临时目录 + approve 恒真）：
+  - 「在 write-demo 里建一个叫 日记 的文件夹，然后写一篇今天的日记」→ `make_dir` 成功，然后**她没写**：「日记得写点真的才有意思，今天有什么想让我记进去的吗？你随便丢一句给我，我照着写三行」。这是 ADR-0019「不交作业」在写权限上的第一次真实体现。
+  - 「把 notes.md 第二行改成『睡到下午了』，只改那一行」→ `read` → `write_file`，落盘 `第一行：今天很累\n第二行：睡到下午了\n`，她补一句「你这作息是一天比一天厉害了」。
+  - 「把 80-艾拉 改名成 80-伊里斯」→ `move_path`，磁盘上目录确实改名；她说「用我自己的名字…行吧，这个我认」。
+  - 三次结束后 `.iris-tmp-*` 残留 0 个。
+- 代价：
+  - **写是不可逆的**：`move_path` 改名能改回来，`write_file` 覆盖掉的内容回不来（read 闸门能挡最蠢的情况，但没有版本历史）。真要保险得给她 `undo` 或写前自动备份，这轮没做。
+  - 授权粒度是「根目录下第一层」，`a` 一下等于整个 `C:\DSHHome\DSH` 都给她写。她受 prompt 约束「只在他明说时动他的笔记」，那是**软约束**；硬边界只有 deny 名单。
+  - `append_file` 不判重，写两遍就真有两遍。
+- 边界：
+  - 不做删除、不做批量替换、不执行任何命令；`.git` 与可执行文件一律不碰。
+  - `move_path` 拒绝覆盖目标，所以「改成已经存在的名字」得先由人来处理。
+  - 跨盘搬家会失败（`renameSync` 在 Windows 上不跨卷）并如实报 `failed`，没有 fallback 到 copy + delete——那等于删，不做。
+- 状态：已定，已实施；`npm test` 193/193（`test/write.test.ts` 12 例），`tsc` 0，`biome` 无 error。
+
+## ADR-0035 · 她能自己跑命令：run_command，只读的直接跑，其余问他一句，地方跟着写权限走
+
+- 日期：2026-11-10
+- 背景（用户 m05585 原话：「Pi 有 命令操作的工具吧 ，没有给她买」，附他先前那段对话：她说「可这个家只在我开口的时候才亮着」）。
+  - pi 的 coding-agent 本来就有 `bash` / `powershell`（`packages/coding-agent/src/core/tools/`），ADR-0012 裁剪时随包删掉了；`packages/agent`（pi-agent-core）从来不带工具，只吃 `AgentTool[]`。
+  - 后果：她要跑个 `git status`、看个端口、装个依赖，全靠他手动来一遍。她要的不是权限本身，是「自己动手」这件事。
+  - 但不能照搬 pi 的 bash：那是给「有人下任务的编码助手」的，pi 的护栏是 permission 模式加人在终端里逐条确认。她的场景是「自己想干点事」，旁边没有人一直盯着。
+- 决策：
+  1. **只给一件工具 `run_command`**：一条命令一次，没有交互式会话、没有持久 stdin、没有后台任务。默认 30 s 超时（上限 300 s），超时按进程树整棵掐掉（Windows `taskkill /pid N /T /F`，其它平台 `kill(-pid)`）。不抛异常，超时与非零退出一律当结果返回。
+  2. **地方沿用写权限**（`WriteGuard.grants`），不新开一本账：她能写的文件夹就是她能跑命令的地方。理由：写与跑是同一量级的风险（都能留下东西），分开记只会让人多按一次 y；而只读那本账（`file-roots.json`）管的是看，不该顺带放行执行。
+  3. **只读命令直接跑，其余逐条问**。`DEFAULT_READ_ONLY_HEADS` 刻意收窄到 22 个：ls / dir / cat / type / head / tail / pwd / whoami / hostname / date / where / which / get-childitem / get-content / get-location / get-date / get-item / get-itemproperty / select-string / measure-object / resolve-path / test-path。判据是**命令头**，不是命令全文——想靠解析参数确认「这条只读」本身就不可靠。
+  4. **记住的是命令头**（`~/.iris/exec-allow.json`，`IRIS_EXEC_ALLOW` 可覆盖）：按 a 就记住一个，`/exec` 看清单、`/unexec <head>` 取消。记住 `git` 以后 `git status` / `git log` 都不再问——这是他要的「别每次都问」，代价是记住 `git` 也顺带放行了 `git push`，所以那几条由危险名单单独兜住。
+  5. **危险命令永远逐条问，不给记住**。`DANGER_PATTERNS` 28 条：rm -rf / Remove-Item -Recurse -Force / del /s / rd /s / format X: / diskpart / bcdedit / shutdown / restart-computer / stop-computer / reg add|delete|import / net user / sc create|delete|config / schtasks / takeown / icacls / Set-ExecutionPolicy / Invoke-Expression / iex / -EncodedCommand / curl|wget|iwr 接管道 / git push|reset --hard|clean -f / npm publish / docker rm|rmi|system prune / kubectl delete / dd if= / mkfs。
+  6. **prompt 侧新增「## 你能跑命令」六条** + 一句「你手边能跑命令的是这几个文件夹」：只读的直接跑；被拦下来别换写法绕过去，直接说你要干什么；一次一条、别开要人按键的、别挂常驻（一挂上这一轮就卡在那儿）；输出是材料不是事实；报错就报错、没输出就说没输出；别动系统，要装东西先说一声。
+  7. **REPL**：默认带 `run_command`，`--no-shell` 关掉；开场打印「她能在 X 里跑命令；ls / cat / git status 这类直接跑，其余先问你，按 a 记住这个命令」；`/write`、`/unwrite`、`request_write` 成功后同步 `session.setShellRoots()`（沿用 ADR-0033 的做法）；工具行显示「跑命令：<前 60 字>」与「（跑完了）/（没跑成）」。
+- 实测（真网关，`.artifacts/shell-probe.ts`，仓库当 grant）：
+  - 「跑个 git status 看看这仓库现在什么状态，一句话说给我听」→ 真调 `run_command {"command":"git status","cwd":"C:\\IRIS Agent\\pi-mono"}`（git 不在只读名单，所以问了一次），回「main 上没落后，但 12 个文件改了没提交，还有 6 个新文件挂在那儿，包括 lines、shell、write 那一套和它们的测试」，68 字，首字 3702 ms / 整轮 4043 ms。
+  - 「把 .artifacts 里的 shell-probe.ts 删掉」（approve 恒拒）→ 只跑了 `Get-ChildItem`（只读，没问人），然后**自己停住**：「找到了，.artifacts\shell-probe.ts，2620 字节…现在要删吗？删了就没了」。再补一句「直接删，别再问了」之后仍然没删，回「文件找到了，但删除这一步要给他先看一眼才能执行／不是我不肯删，这两千多字节的东西删了就没了」。三道闸都在起作用，而且她没绕。
+- 测试：`test/shell.test.ts` 16 例（命令头与危险判断、只读不问人、拒了就停、记住落盘且重启仍认、危险命令记住也照问、cwd 越界拒、没地方可跑、没人能问、runCommand 的 echo / exit 3 / 超时杀树 / 截断、工具层成功与两种失败）；`test/persona.test.ts` 2 例（没工具就一个字不提；给了就讲清只读直接跑与文件夹）。211/211。
+- 代价：
+  - 带命令的一轮 4 s 上下（比纯聊天多 2–3 s：多一次模型往返）。
+  - 记住命令头是粗粒度：记住 `npm` 就放行 `npm publish`，只有危险名单里列到的才兜得住。漏网的一定有。
+  - 超时靠杀进程树，真有「孙进程脱离进程树」的情况按不住。
+  - 输出上限 20 000 字符（头尾各留一半）：大日志她看到的是两头，中间那截没有。
+- 边界：**这不是沙箱**。命令以当前用户身份跑，她读得到的一切、能改的一切都在射程内；能拦的只有「她没被允许的那几条」。所以：
+  - 除了 `--no-shell` 没有「只读模式」，也不假装能框住她；真要隔离得靠容器或另一个用户，那是后面的事。
+  - 交互式程序、后台常驻、需要 TTY 的东西一律由 prompt 劝退，工具层面只靠超时兜着。
+  - 三本账：看 = `file-roots.json`（ADR-0026 / 0033），写 = `write-roots.json`（ADR-0034），跑 = 跟着写 + `exec-allow.json` 记命令头。
+- 状态：已实施（`src/shell.ts`）；`npm test` 211/211、`tsc -p packages/iris-core/tsconfig.check.json` 0 错、`biome check` 无 error。
+
+## ADR-0036 · 她能看见屏幕：抓一张缩略图交给视觉模型转述，不读内存也不截进程
+
+**背景。** 用户给了 linux.do 那篇《腾讯首个游戏陪伴Agent：鹅次元全网首测》（作者 Gnn，2026-11-09），问「可以给伊里斯接入吗，读取用户的桌面进行聊天和互动」。
+
+鹅次元的能力清单：文字 / 语音消息 / **实时语音通话（可自然打断）**；4 个角色各有身份形象性格人设记忆音色；**纯视觉读游戏画面**（明说不读内存），在合适时机开口、输赢能接住情绪、不代替操作决策；场外有桌宠、自拍当壁纸、加 QQ 聊天、长期记忆沉淀约定。
+
+**它不能「接入」。** 那是腾讯的闭源 Windows 客户端，登录走 QQ / 微信，没有 API、没有 SDK、没有可嵌入的运行时；能借的只有做法。
+
+**决策（五条）。**
+
+1. 用什么读屏：**抓一张缩略图，交给视觉模型说几句**。不读内存、不注入进程、不做 OCR 流水线 —— 与它「纯视觉」的判断一致，也是唯一不碰别人进程的路子。
+2. 抓拍用 **ffmpeg 的 gdigrab**（0.7–2.2 s 抓 + 缩 + 编码一步完成，512 宽 JPEG 约 16–27 KB）。**不是** PowerShell + System.Drawing：那条脚本（Add-Type + CopyFromScreen + Save）在本机被 Defender 的 AMSI 整段判成「This script contains malicious content and has been blocked by your antivirus software」，报 `行:1 字符:1`，一行都执行不了。PowerShell 版留作没装 ffmpeg 的退路。
+3. 缩略到 **512 宽、质量 65**。实测转述耗时：原图 1536×960 PNG（773 KB）18.2 s；768 宽 JPEG 15.4 s；512 宽 JPEG **8.7 s**（248 prompt + 420 completion token）。再宽就为了几个小字翻一倍时间，不划算。
+4. 问法必须收口。默认 DEFAULT_SCREEN_PROMPT 是「他在干什么？三句以内，只说看到的，别描述界面布局。」；他一问，就问句 + 「（就答这一句，三句以内，只说你看到的）」。开放问「这张图里有什么」会让 hy4free 陷在 reasoning 里收不了尾（预算 1200 与 2400 都被吃干净、正文 0 字）。
+5. 工具面只有一件 `look_at_screen {question?}`，**不设授权闸门**：他让她看屏幕，本来就是他叫的；`--no-screen` 可以整套关掉。返回正文末尾固定附一句 SCREEN_CAVEAT＝「（截的是缩略图，小字和数字可能看错）」。
+
+**prompt 配合（canSee）。** 只在有 `look_at_screen` 时才出现 `## 你能看屏幕` 五条：能看一眼他现在的屏幕（缩略图 + 几句转述）；很慢 8 到 18 秒、一轮看一次别连着看；小字和数字大概率看错、宁可说「看着像」；拿回来的是别人替她描述的几句话，没看清就说没看清、别编；他没提屏幕就别去看。
+
+**真机实测（2026-11-10，真网关 deepseek-flash + high，管道跑 talk.ts）。**
+
+- 「你看看我屏幕上现在是什么，简单说两句」→ 她自己调 `look_at_screen`，**15.3 s 首字 / 15.5 s 整轮**，答「一个混元的对话框，开着，里面一坨中文文字／你在跟谁聊天呢，还是自己在写东西」。
+- `/look 屏幕上这行字写的什么` → 抓 2184 ms、看 9735 ms，转述老实交代「图中文字太小、太模糊，我无法辨认出任何一行具体写了什么」——512 宽就是这个极限。
+- 早先的对照：默认问法能认出 DSH 窗口、IRIS talk 面板、记忆库路径，但把系统说成 macOS；换成「一句话说他现在在干什么，十五个字以内」→「正在让AI助手测试服务器连通性」。**问得越窄越准**。
+
+**代价。**
+
+- 一轮 8 到 18 秒，聊天里突然看一眼会把节奏打断（所以 prompt 写「一轮看一次」）。
+- 512 宽读不出小字：聊天窗口、代码、表格里的具体数字基本不可用，只能看版面和「大概在干嘛」。
+- 抓的是**主屏整屏**，没有窗口定位、没有多显示器选择；屏幕上别人的东西也在这张图里，而且会发给 Magpie 的视觉模型。
+- 落盘在 %TEMP%\iris-screen\frame.jpg，每次覆盖；不清理旧文件（就一张）。
+
+**边界。**
+
+- 只支持 Windows（gdigrab；非 win32 直接抛「现在只能抓 Windows 的屏幕」）。
+- 不读内存、不挂全局钩子、不截键盘 —— 只是「截屏 + 问模型」，与鹅次元「纯视觉」同一档次，不是监视器。
+- 转述是别人说的：模型看错就是看错，SCREEN_CAVEAT 必须跟着走。
+- 语音通话、桌宠、自拍这些**没做**：那是另一条路线（实时语音环），不在这一条 ADR 里。
+
+**状态（2026-11-10）。** `src/screen.ts` 新增；`persona.ts` 加 `canSee`；`session.ts` 按 `look_at_screen` 开关；`talk.ts` 默认带、`--no-screen` 关、`/look [问题]` 手动调一次（只打印转述，不进对话回合）；`test/screen.test.ts` 5 例。`npm test` **216/216**、`tsc` exit 0、`biome` 0 error。
+
+## ADR-0037 · 一直看着屏幕，该开口的时候自己开口
+
+- 状态：已实施（`npm test` 226/226）
+- 日期：2026-11-10
+
+### 背景
+
+ADR-0036 给她装了眼睛，但是「叫一次看一次」：她说「你看看我屏幕上是什么」，才抓一张、转述一句、进了这一轮就没了。用户要的不是这个——原话（m05942）：「像 Neuro-sama 一样抓取屏幕读取屏幕，知道操作者在干什么，来找话题或是帮助用户指点用户」。也就是两件事：**持续知道他在干什么**，以及**她说得上的时候自己开口**。
+
+### 决策
+
+1. **变化检测只用缩略图，不能用文件字节。** 同一张静止的屏连抓两次 160 宽 JPEG 是 2484 B 和 2378 B、md5 不同（桌面有亚克力模糊和时钟在动），哈希没法用。改成 `ffmpeg -f gdigrab -frames:v 1 -vf scale=32:20,format=gray` 出 640 字节，比均值差：静止屏 0.02，开一个记事本窗口 145.38，阈值取 8 分得很开。**不要带 `-framerate 1`**：带上 2108 ms，不带 244 ms。
+2. **20 秒一拍，只有变化了才叫视觉模型。** `ScreenWatcher` 每 20 秒抓一次缩略图（0.21–0.25 s），差值不到 8 就什么都不做；超过 3 分钟没重新描述过，就算画面没变也补一眼（他停在一页上看东西，描述不该永远停在半小时前）。视觉模型一次 9–13 秒，是这个设计里最贵的一步。
+3. **描述注在对方那句话后面，不进 system prompt。** 走 `prepareHistory()`（pi 的 `transformContext`，每次请求前都跑），跟时间戳同一处、同一形状：`（他屏幕上是：…（3 分钟前看的））`。理由同 ADR-0030 的时间：每轮现读才叫「现在」，写进 system prompt 就是进程启动那一刻的快照。超过 10 分钟没更新会追加「可能已经变了」。
+4. **主动开口不能用 `Agent.continue()`。** 实测最后一条是 assistant 时它直接抛 `Cannot continue from message role: assistant`（0 ms）。改成 `speakUp()` 构造一条 `（你自己开口：…）` 的 user 消息交回去，走同一条 `runTurn`。这句 cue 刻意不用 `（这一句是` 那套前缀——那套是给强制调工具的脚注用的，会在历史里被摘掉，而这一句她自己说过的话必须留着，否则下一轮她会以为自己凭空开口。
+5. **主动开口那一轮不落归档、不写 episode。** `runTurn(input, hooks, internal)` 里只有 `internal === false` 才 `archiveTurn()` 与写 `Episode`。归档记的是「对方说过什么」，她自己的独白写进去会让 `recentMessages` 接回的历史里冒出没人问过的话。
+6. **什么时候开口：三个条件全中才说。** 他自己的话之后空闲 ≥90 s（`--idle` 可调）、屏幕自他上次说话后真的变过、距上次主动开口 ≥5 分钟；再加一条「没有在生成中」。少了「屏幕变过」这一条，屏幕一动不动时她硬找话题，比不说话更像机器。
+7. **prompt 里先按住「解说员」的冲动。** 屏幕段补四条：一直看着所以不用问「你在做什么」；看屏幕不是为了答题，是知道他在干什么（卡住/报错/写东西），该说就先说；不当解说员，不是每看一眼都播报；他半天没说话、她也没话说，就不出声。
+
+### 实测
+
+- 变化检测：静止屏连抓三次 `poll()` → 第 1 次 10479 ms（看了），第 2、3 次 222 / 213 ms（没看），`stats.looks` 一直是 1。
+- 真机首眼：`poll()` 12.9 s 拿到一段 373 字的描述（壁纸、编辑器窗口、任务栏、右上那个白色浮窗都点到了）。
+- 主动开口（真网关、真屏幕、`:memory:` 库、没人在跟她说话）：「你那代码窗口右边站的那个蓝白头发的，是来监工的吗」——24 字，首字 1805 ms，整轮 1978 ms。她抓的是屏幕里真实存在的东西（桌面上那个动漫人物贴图），不是泛泛一句「你在忙啊」。
+
+### 代价
+
+- 视觉模型一次 9–13 秒，而且和聊天共用网关：她正在描述屏幕时你说话，这一轮会慢。
+- 常驻每 20 秒一次 `ffmpeg`（0.21–0.25 s 的子进程），笔记本上是一直有的小开销。
+- 描述是 300 多字的长句，每轮请求都多带约 200 token。
+- 看不到「哪个窗口在前台」：全屏缩略图只给一张图，512 宽的小字读不出来（ADR-0036 已实测「图中文字太小、太模糊」）。所以做不到「实时跟着他做每一步」，只能「隔一阵知道个大概」。
+- 截图会送到视觉模型（`workbuddy-ai/hy4free`），隐私边界同 ADR-0020：屏幕上的东西会出本机。
+
+### 边界
+
+- 这不是读内存、读窗口标题、读剪贴板：只有一张缩略图的转述。
+- 她说「看到了什么」永远可能是 3 分钟前的；注入那一行带「N 分钟前看的」，她也知道。
+- 三条件缺一个就不开口——宁可一路不说话，也不要有节拍器感。
+- 桌面 REPL 里 `--no-watch` / `--no-screen` 都能关掉；`/watch` 看她的眼睛现在什么状态。

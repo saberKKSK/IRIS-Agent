@@ -182,3 +182,26 @@ describe("文件工具的 prompt 配合", () => {
 		assert.match(text, /桌面[\s\S]{0,40}Desktop/);
 	});
 });
+
+describe("跑命令的 prompt 配合（ADR-0035）", () => {
+	const base = {
+		persona,
+		state,
+		relationship: { closeness: 0.5, sharedMoments: 3, lastInteractionAt: 1 },
+		recent: [] as Episode[],
+		now: 10,
+	};
+
+	it("没有 run_command 就一个字都不提", () => {
+		const text = buildSystemPrompt(base);
+		assert.doesNotMatch(text, /## 你能跑命令/);
+	});
+
+	it("给了就讲清：只读的直接跑，其余先问人，地方跟着能写的走", () => {
+		const text = buildSystemPrompt({ ...base, canShell: true, shellRoots: ["C:\\IRIS Agent\\pi-mono"] });
+		assert.match(text, /## 你能跑命令/);
+		assert.match(text, /只读的命令/u);
+		assert.match(text, /一次跑一条/u);
+		assert.match(text, /C:\\IRIS Agent\\pi-mono/);
+	});
+});
