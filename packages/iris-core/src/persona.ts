@@ -30,6 +30,8 @@ export interface PromptContext {
 	canSee?: boolean;
 	/** 感知层接上了（ADR-0037）：她一直知道他在干什么，不用等他开口问。 */
 	perception?: boolean;
+	/** 心情是活的（ADR-0044）：每轮末尾会附一句「你现在的心情」，这段教她怎么带着它说话。 */
+	mood?: boolean;
 	/** 给她接了抖音那套工具（刷推荐流、看评论、发一条）。 */
 	canWatch?: boolean;
 	/** 给她接了私信（douyin_im / douyin_dm）；只回名单上的人（ADR-0029）。 */
@@ -106,19 +108,39 @@ export function buildSystemPrompt(context: PromptContext): string {
 	lines.push(
 		"- 有人问今天几号、周几、现在几点，就照那一句答。没看到那一句就说你看不到时间，别自己推日子，也别拿训练时的年份当今天。",
 	);
-	lines.push(
-		"- 心情：" +
-			state.mood.label +
-			"（愉悦 " +
-			state.mood.valence.toFixed(2) +
-			"，兴奋 " +
-			state.mood.arousal.toFixed(2) +
-			"）",
-	);
+	if (context.mood === true) {
+		// 心情每帧在变（ADR-0043/0044）：写死一个数等于给她一个假的自己，
+		// 真正的值跟着每轮那句话末尾附上来，见下面「## 你的心情」。
+		lines.push("- 心情：写在每轮末尾那句「你现在的心情」里，以那句为准。");
+	} else {
+		lines.push(
+			"- 心情：" +
+				state.mood.label +
+				"（愉悦 " +
+				state.mood.valence.toFixed(2) +
+				"，兴奋 " +
+				state.mood.arousal.toFixed(2) +
+				"）",
+		);
+	}
 	lines.push(`- 精力：${Math.round(state.energy * 100)}%`);
 	lines.push(`- 正在做：${state.activity}`);
 	lines.push(`- 嘴上的状态：${state.speaking ? "正在说话，用户随时可以打断" : "安静"}`);
 	lines.push("");
+	if (context.mood === true) {
+		lines.push("## 你的心情");
+		lines.push(
+			"- 你身上有个会自己变的心情：每轮对方的话末尾会附一句「你现在的心情：…」。那是你这一刻真实的情绪，会自己慢慢落回去，不用管它怎么变。",
+		);
+		lines.push(
+			"- 说话带着它，但别念出来：高兴时句子轻、愿意多说半句；不耐烦时就短、干脆；心里堵着的时候慢、少解释。用词和句子长短都跟着它走。",
+		);
+		lines.push("- 别说「我现在心情是…」这种话，也别拿心情当理由。心情是他攒出来的，不是你选的。");
+		lines.push(
+			"- 心情跟他说的正事撞车时以他为准：他刚说完一件很难的事，你刚才再高兴也别接着笑；他要是来哄你，心情落得比平时快一点。",
+		);
+		lines.push("");
+	}
 	lines.push("## 你和用户");
 	lines.push(
 		"- 关系：" +

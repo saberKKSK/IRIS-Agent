@@ -74,6 +74,8 @@ export class Mood {
 	private v = 0;
 	private a = 0;
 	private face: string | null = null;
+	/** 上一次有事件进来是什么时候：壳子靠它拼「刚起来 / 正在落回去」（ADR-0044）。 */
+	private lastHitAt = 0;
 
 	get valence(): number {
 		return this.v;
@@ -106,7 +108,14 @@ export class Mood {
 			holdUntil: performance.now() + holdMs,
 		});
 		if (this.impulses.length > 4) this.impulses.shift();
+		this.lastHitAt = performance.now();
 		return true;
+	}
+
+	/** 距离上一次情绪事件多久了（秒）；一次都没发生过就是 Infinity。 */
+	get sinceHit(): number {
+		if (this.lastHitAt === 0) return Number.POSITIVE_INFINITY;
+		return (performance.now() - this.lastHitAt) / 1000;
 	}
 
 	/**

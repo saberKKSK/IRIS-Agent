@@ -14,11 +14,54 @@ const stage = new Stage();
 let bridge: Bridge | null = null;
 let streaming = false;
 
+/** 工具名 -> 人话。她看屏幕时要 40 秒，页面上得有一句「在看你的屏幕」而不是干等着。 */
+const TOOL_LABELS: Readonly<Record<string, string>> = {
+	look_at_screen: "在看你的屏幕",
+	web_search: "在上网查",
+	web_fetch: "在翻网页",
+	ls: "在看文件夹",
+	read: "在读文件",
+	grep: "在翻找内容",
+	write_file: "在写文件",
+	append_file: "在往后加内容",
+	make_dir: "在建文件夹",
+	move_path: "在给东西搬家",
+	request_access: "在等你点头（看）",
+	request_write: "在等你点头（写）",
+	run_command: "在跑命令",
+	douyin_feed: "在刷",
+	douyin_comments: "在看评论",
+	douyin_reply: "在发评论",
+	douyin_like: "在点爱心",
+	douyin_im: "在看私信",
+	douyin_dm: "在发私信",
+};
+
+/** 正在跑的工具（可能并行两件），栈顶那个决定中间态说什么。 */
+const runningTools: string[] = [];
+/** 有一张卡片在屏幕上等答复：这时候说什么都不如「在等你点头」。 */
+let asking = false;
+
+function refreshBusy(): void {
+	if (asking) {
+		ui.setBusy("在等你点头");
+		return;
+	}
+	const top = runningTools.at(-1);
+	ui.setBusy(top === undefined ? null : (TOOL_LABELS[top] ?? "在用 " + top));
+}
+
 const ui = mountUi({
 	onSay(text: string): void {
 		if (bridge === null) return;
 		void bridge.say(text).then((result) => {
 			if (!result.ok) ui.setError("发不出去：" + (result.reason ?? "daemon 没在跑？"));
+		});
+	},
+	onAnswer(id: string, choice: "yes" | "always" | "no"): void {
+		if (bridge === null) return;
+		void bridge.answer(id, choice).then((result) => {
+			if (!result.ok) ui.setStatus("这个答复没送到：" + (result.reason ?? "?"));
 		});
 	},
 	onLayout: () => reportRegion(),
@@ -35,7 +78,11 @@ function reportRegion(): void {
 	const caption = document.querySelector<HTMLElement>("#caption");
 	const composer = document.querySelector<HTMLElement>("#composer");
 	const grip = document.querySelector<HTMLElement>("#grip");
-	shell.setRegion([stage.bodyBox(), boxOf(grip, 2), boxOf(caption, 6), boxOf(composer, 4)]);
+	const ask = document.querySelector<HTMLElement>("#ask");
+	const boxes = [stage.bodyBox(), boxOf(grip, 2), boxOf(caption, 6), boxOf(composer, 4)];
+	// 等答复的那张卡片也要吃鼠标，不然按钮点不动（窗口是按这几块切输入区的）
+	if (ask !== null && !ask.hidden) boxes.push(boxOf(ask, 6));
+	shell.setRegion(boxes);
 }
 
 const handle = (event: BridgeEvent): void => {
@@ -47,6 +94,10 @@ const handle = (event: BridgeEvent): void => {
 			if (!streaming) {
 				streaming = true;
 				stage.setTalking(true);
+				// 一轮的头一句：先把字幕清干净再往里追加。少了这一句，上一轮的话
+				// 会被这一轮接在后面（用输入框发的时候 buffer 在提交时清过，所以只有
+				// 程序发起的轮次看得出这个 bug）。顺带把输入框锁上。
+				ui.startTurn();
 			}
 			ui.pushDelta(event.text);
 			break;
@@ -63,7 +114,34 @@ const handle = (event: BridgeEvent): void => {
 			break;
 		}
 		case "tool":
-			if (event.phase === "start") ui.setStatus("在用 " + event.toolName + "…");
+			if (event.phase === "start") {
+				runningTools.push(event.toolName);
+			} else {
+				const at = runningTools.lastIndexOf(event.toolName);
+				if (at >= 0) runningTools.splice(at, 1);
+				if (event.isError === true) ui.setStatus(event.toolName + " 没成");
+			}
+			refreshBusy();
+			break;
+		case "ask":
+			// 她要碰文件 / 写 / 跑命令：问题落到窗口里，他点了才回来（ADR-0045）。
+			if (event.phase === "ask" && event.options !== undefined) {
+				asking = true;
+				refreshBusy();
+				ui.showAsk({
+					id: event.id,
+					title: event.title ?? "她想动点东西",
+					detail: event.detail ?? "",
+					...(event.why === undefined ? {} : { why: event.why }),
+					...(event.where === undefined ? {} : { where: event.where }),
+					options: event.options,
+				});
+			} else {
+				asking = false;
+				ui.hideAsk();
+				if (event.phase === "timeout") ui.setStatus("等太久，按不给处理了");
+				refreshBusy();
+			}
 			break;
 		case "compact":
 			ui.setStatus("上下文压掉 " + String(event.dropped) + " 条");
@@ -110,6 +188,13 @@ setInterval(() => {
 		.then((gaze) => stage.followPointer(gaze.x, gaze.y))
 		.catch(() => {});
 }, 100);
+
+// 把她此刻的心情报给 daemon（ADR-0044）：内核每轮把它拼成一句话贴在对方那句末尾，
+// prompt 里「## 你的心情」那一段教她带着它说话。平静的时候 daemon 会自己闭嘴。
+setInterval(() => {
+	if (bridge === null) return;
+	void bridge.mood(stage.moodSnapshot()).catch(() => {});
+}, 2000);
 
 /** 这一处（或它上面的某一层）是不是拖窗区：CSS 里写着 `--app-region: drag`。 */
 function draggable(node: EventTarget | null): Element | null {

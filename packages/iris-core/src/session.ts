@@ -184,6 +184,13 @@ export interface IrisSessionOptions {
 	 * 没接感知层就不贴。返回 null 表示还没有可用的描述。
 	 */
 	perception?: () => string | null;
+	/**
+	 * 她此刻的心情，一行话（ADR-0044）。壳子里情绪是每帧在变的（apps/desktop/src/mood.ts 的
+	 * VAD + 残留），所以内核每轮现问一次，贴在对方那句话末尾——不写进 system prompt：
+	 * 那里一改就把 prefix cache 全废掉，而且心情一直在变，写死等于给她一个假的自己。
+	 * 返回 null 表示这一刻没什么好说的（心情平了就闭嘴，别每轮都报「我心情平静」）。
+	 */
+	mood?: () => string | null;
 	/** 时间源，测试可注入。 */
 	clock?: () => number;
 	/** 会话级事件监听。 */
@@ -437,6 +444,7 @@ export class IrisSession {
 	private readonly dmNames: readonly string[];
 	/** 感知层：每轮现问一次「他现在在干什么」（ADR-0037）。 */
 	private readonly perception: (() => string | null) | undefined;
+	private readonly mood: (() => string | null) | undefined;
 	private restoredCount = 0;
 	private styleName: string | null;
 	private readonly episodeTags: readonly string[];
@@ -505,6 +513,7 @@ export class IrisSession {
 		this.shellRoots = options.shellRoots ?? options.writeRoots ?? [];
 		this.dmNames = options.dmNames ?? [];
 		this.perception = options.perception;
+		this.mood = options.mood;
 		// 先把会话行定下来，再拿它接历史：重启复用的是同一条会话，不是又一条新的。
 		this.conversationId = this.startConversation();
 		const model = magpieModel(options);
@@ -991,6 +1000,7 @@ export class IrisSession {
 			...(this.hasWriteTools() && this.writeRoots.length > 0 ? { writeRoots: this.writeRoots } : {}),
 			...(this.toolNames.has("look_at_screen") ? { canSee: true } : {}),
 			...(this.toolNames.has("look_at_screen") && this.perception !== undefined ? { perception: true } : {}),
+			...(this.mood === undefined ? {} : { mood: true }),
 			...(this.toolNames.has("run_command") ? { canShell: true } : {}),
 			...(this.toolNames.has("run_command") && this.shellRoots.length > 0 ? { shellRoots: this.shellRoots } : {}),
 			now,
@@ -1053,7 +1063,19 @@ export class IrisSession {
 		const last = messages.length - 1;
 		const cleaned = messages.map((message, index) => (index === last ? message : stripNudge(message)));
 		const compacted = this.compactor === null ? cleaned : await this.compactor.compact(cleaned);
-		return stampMoment(compacted, momentNote(this.clock()) + this.perceptionNote());
+		return stampMoment(compacted, momentNote(this.clock()) + this.perceptionNote() + this.moodNote());
+	}
+
+	/** 她这一刻的心情（ADR-0044）；平了就什么都不加，免得每轮都在报「我很平静」。 */
+	private moodNote(): string {
+		if (this.mood === undefined) return "";
+		try {
+			const line = this.mood();
+			if (line === null || line.trim().length === 0) return "";
+			return "\n（你现在的心情：" + line.trim() + "）";
+		} catch {
+			return "";
+		}
 	}
 
 	/** 感知层那一行；没接、或者还没看到过就什么都不加。 */

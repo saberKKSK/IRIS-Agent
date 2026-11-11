@@ -2,6 +2,15 @@
 
 const MAX_SAID = 600;
 
+export interface AskPayload {
+	id: string;
+	title: string;
+	detail: string;
+	why?: string;
+	where?: string;
+	options: readonly { key: string; label: string }[];
+}
+
 export interface ChatUi {
 	setTopic(text: string): void;
 	pushDelta(text: string): void;
@@ -9,6 +18,11 @@ export interface ChatUi {
 	endTurn(summary: string): void;
 	setStatus(text: string): void;
 	setError(text: string): void;
+	/** 工具中间态：null 收起。带秒数——她在看屏幕时一动不动的 40 秒，靠这行证明人还在。 */
+	setBusy(label: string | null): void;
+	/** 她要看/写/跑命令，在等一个答复（ADR-0045）。 */
+	showAsk(ask: AskPayload): void;
+	hideAsk(): void;
 }
 
 export interface UiOptions {
@@ -16,6 +30,8 @@ export interface UiOptions {
 	/** 字幕条出现/消失/变高时叫一声：窗口要跟着改「哪儿吃鼠标」。 */
 	onLayout?(): void;
 	onQuit?(): void;
+	/** 他点了卡片上的某个按钮。 */
+	onAnswer?(id: string, choice: "yes" | "always" | "no"): void;
 }
 
 export function mountUi(options: UiOptions): ChatUi {
@@ -26,12 +42,51 @@ export function mountUi(options: UiOptions): ChatUi {
 	const send = document.querySelector<HTMLButtonElement>("#send");
 	const quit = document.querySelector<HTMLButtonElement>("#quit");
 	const status = document.querySelector<HTMLDivElement>("#status");
-	if (caption === null || topic === null || said === null || input === null || send === null || status === null) {
-		throw new Error("界面结构不对：index.html 里少了 caption / input 这些节点");
+	// 名字别叫 busy：下面那个 busy 是「这一轮还没说完」，两回事。
+	const busyBar = document.querySelector<HTMLDivElement>("#busy");
+	const busyText = busyBar?.querySelector<HTMLSpanElement>("span") ?? null;
+	const ask = document.querySelector<HTMLDivElement>("#ask");
+	const askTitle = document.querySelector<HTMLDivElement>("#ask-title");
+	const askDetail = document.querySelector<HTMLDivElement>("#ask-detail");
+	const askWhy = document.querySelector<HTMLDivElement>("#ask-why");
+	const askButtons = document.querySelector<HTMLDivElement>("#ask-buttons");
+	if (
+		caption === null ||
+		topic === null ||
+		said === null ||
+		input === null ||
+		send === null ||
+		status === null ||
+		busyBar === null ||
+		busyText === null ||
+		ask === null ||
+		askTitle === null ||
+		askDetail === null ||
+		askWhy === null ||
+		askButtons === null
+	) {
+		throw new Error("界面结构不对：index.html 里少了 caption / input / busy / ask 这些节点");
 	}
 
 	let buffer = "";
 	let busy = false;
+
+	// 工具中间态：一开始想着用 setTimeout 每 500 ms 重画，但工具一结束就得撤掉定时器，
+	// 漏一次就有个定时器在后台陪着页面跑到关窗。所以标记位 + 一个常驻定时器，平时它闭嘴。
+	let busyLabel: string | null = null;
+	let busySince = 0;
+	const paintBusy = (): void => {
+		if (busyLabel === null) {
+			busyBar.hidden = true;
+			return;
+		}
+		const seconds = Math.floor((performance.now() - busySince) / 1000);
+		busyText.textContent = busyLabel + (seconds >= 3 ? " · " + String(seconds) + " 秒" : "");
+		busyBar.hidden = false;
+	};
+	window.setInterval(paintBusy, 500);
+
+	let askId: string | null = null;
 
 	const paint = (): void => {
 		const text = buffer.length > MAX_SAID ? "…" + buffer.slice(-MAX_SAID) : buffer;
@@ -96,6 +151,47 @@ export function mountUi(options: UiOptions): ChatUi {
 			topic.textContent = "出错了";
 			busy = false;
 			input.placeholder = "跟她说点什么…";
+			options.onLayout?.();
+		},
+		setBusy(label: string | null): void {
+			if (label === busyLabel) return;
+			busyLabel = label;
+			busySince = performance.now();
+			paintBusy();
+			options.onLayout?.();
+		},
+		showAsk(payload: AskPayload): void {
+			askId = payload.id;
+			askTitle.textContent = payload.title;
+			askDetail.textContent = payload.detail;
+			const where = payload.where === undefined ? "" : payload.where;
+			askWhy.textContent = [where, payload.why ?? ""].filter((part) => part.length > 0).join(" · ");
+			askWhy.hidden = askWhy.textContent.length === 0;
+			askButtons.textContent = "";
+			for (const option of payload.options) {
+				const button = document.createElement("button");
+				button.type = "button";
+				button.textContent = option.label;
+				button.dataset.key = option.key;
+				button.addEventListener("click", () => {
+					if (askId !== payload.id) return;
+					// 点过就把这张卡片锁住：daemon 那边可能还要几十毫秒才发现，连点两下会发两次。
+					for (const other of askButtons.querySelectorAll("button")) {
+						other.disabled = true;
+					}
+					button.classList.add("picked");
+					options.onAnswer?.(payload.id, option.key as "yes" | "always" | "no");
+				});
+				askButtons.appendChild(button);
+			}
+			ask.hidden = false;
+			options.onLayout?.();
+		},
+		hideAsk(): void {
+			if (askId === null) return;
+			askId = null;
+			ask.hidden = true;
+			askButtons.textContent = "";
 			options.onLayout?.();
 		},
 	};

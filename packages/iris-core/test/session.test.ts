@@ -699,3 +699,39 @@ test("没接感知层：一个字都不加", async () => {
 	const last = seen[0]?.at(-1) as AgentMessage;
 	assert.doesNotMatch(textOf(last), /他屏幕上是/u);
 });
+
+test("心情是活的：每轮末尾附一句，prompt 里不再写死一个数（ADR-0044）", async () => {
+	const seen: AgentMessage[][] = [];
+	let mood: string | null = "偏高兴、有点兴奋，还在往下落";
+	const session = createSession({
+		persona: PERSONA,
+		streamFn: scripted(["嗯"], (messages) => seen.push([...messages])),
+		compact: false,
+		resumeMessages: 0,
+		mood: () => mood,
+	});
+	assert.match(session.systemPrompt, /## 你的心情/u, "接上心情就要教她怎么带着它说话");
+	assert.match(session.systemPrompt, /以那句为准/u);
+	assert.doesNotMatch(session.systemPrompt, /心情：calm/u, "写死的那个数会跟她真实的心情打架");
+	await session.say("在干嘛");
+	assert.match(textOf(seen[0]?.at(-1) as AgentMessage), /你现在的心情：偏高兴/u);
+	assert.equal(textOf(session.messages.at(-2) as AgentMessage), "在干嘛", "附注不进历史");
+	// 平了就闭嘴：每轮都报一句「我很平静」等于噪音。
+	mood = null;
+	await session.say("好");
+	assert.doesNotMatch(textOf(seen[1]?.at(-1) as AgentMessage), /你现在的心情/u);
+});
+
+test("没接心情：prompt 里还是写死的那个数，也不附注", async () => {
+	const seen: AgentMessage[][] = [];
+	const session = createSession({
+		persona: PERSONA,
+		streamFn: scripted(["嗯"], (messages) => seen.push([...messages])),
+		compact: false,
+		resumeMessages: 0,
+	});
+	assert.doesNotMatch(session.systemPrompt, /## 你的心情/u);
+	assert.match(session.systemPrompt, /心情：calm/u);
+	await session.say("在干嘛");
+	assert.doesNotMatch(textOf(seen[0]?.at(-1) as AgentMessage), /你现在的心情/u);
+});

@@ -242,6 +242,20 @@ export class Stage {
 		this.status("");
 	}
 
+	/**
+	 * 这一刻的心情报给壳子（ADR-0044）：页面每 2 秒 POST /mood 给 daemon，
+	 * 内核每轮把它拼成一句话贴在对方那句末尾——她自己不知道自己什么心情的话，
+	 * 脸上的 VAD 就只是个摆件。
+	 */
+	moodSnapshot(): { valence: number; arousal: number; face: string | null; held: number } {
+		return {
+			valence: this.mood.valence,
+			arousal: this.mood.arousal,
+			face: this.mood.shown,
+			held: this.mood.sinceHit,
+		};
+	}
+
 	/** 指针位置（-1..1，屏幕中心是 0）；上方为负。 */
 	followPointer(nx: number, ny: number): void {
 		this.gaze.x = Math.max(-1, Math.min(1, nx));

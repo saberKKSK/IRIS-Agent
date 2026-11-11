@@ -1173,4 +1173,110 @@ ADR-0041 的标记协议不变（还是正文里写 `<脸红>`，内核摘掉）
 - 情绪现在只影响脸，**不影响语气、句长、动作**。真要接得上，得让 `mood` 反过来进 prompt（见人格蒸馏框架里的 appraisal / policy）。
 - 之前那条 14 s 硬收回（`exprUntil`）对 `mood` 不生效——`mood` 自己衰减，通常 4–14 s 内归零。
 
+## ADR-0044 · 心情写在她每轮那句话的末尾，不写进 system prompt
 
+- 状态：已实施（`/health` 的 `mood` 从 null 变成「高兴得眼睛发亮，刚起来」；同一句「你现在心情怎么样」在 `dark_face` 下答「还行，有点闲得发慌」，在 `smug_eyes` 下答「挺好 / 早上开机一看，没哪儿被拆掉，嘴也就松了」）
+- 日期：2026-11-11
+
+### 背景
+
+ADR-0043 的「代价与边界」最后一条写着：情绪只影响脸，**不影响语气、句长、动作**。用户 m09738 要的就是把这条接上——她得知道自己现在什么心情，说话跟着变。
+
+### 决定
+
+内核（`packages/iris-core/src/session.ts`）加一个和 `perception` 完全对称的钩子：
+
+```ts
+/** 她这会儿的心情：每轮现问一次，贴在对方那句话末尾。返回 null = 平了就闭嘴。 */
+mood?: () => string | null;
+```
+
+`prepareHistory()` 里拼在最后：
+
+```ts
+return stampMoment(compacted, momentNote(this.clock()) + this.perceptionNote() + this.moodNote());
+```
+
+`moodNote()` 产出 `「\n（你现在的心情：……）」`。prompt 侧（`persona.ts`）两处配合：`PromptContext.mood` 为真时，「## 你现在」里原来那条写死的 `心情：calm（愉悦 0.00，兴奋 0.30）` 改成「写在每轮末尾那句里，以那句为准」；并新增一段：
+
+```
+## 你的心情
+- 每轮末尾会附一句你现在的心情
+- 说话带着它，但别念出来
+- 别说「我现在心情是…」，也别拿它当理由
+- 心情跟他正事撞车时以他为准
+```
+
+链路的另一半在壳里：页面每 2 秒把 `stage.moodSnapshot()`（`mood.ts` 的 `valence` / `arousal` / `shown` / `sinceHit`）POST 到 `/mood`；`daemon.mjs` 的 `moodLine()` 把它翻成一句人话：
+
+| 脸 | 那句话 |
+|---|---|
+| `blush` | 脸上发热，有点不好意思 |
+| `heart_eyes` | 高兴得眼睛发亮 |
+| `smug_eyes` | 有点得意，嘴角压不住 |
+| `swirl_eyes` | 脑子乱，有点转不动 |
+| `cold_sweat` | 有点尴尬，脸上挂不住 |
+| `dark_face` | 心里压着火，脸色不好看 |
+| `tears` | 想哭，喉咙发紧 |
+| `distressed_eyes` | 快绷不住了 |
+
+尾巴按「这张脸挂了多久」分三档：`< 4 s`「，刚起来」/ `< 12 s`「，还有点余温」/ 更长「，正在慢慢落回去」。
+
+两个静默条件：页面超过 90 秒没报（窗口关了就没人报了）→ 返回 null；`max(|v|, |a|) < 0.12` → 返回 null。
+
+### 为什么不写进 system prompt
+
+两条：**prefix cache**（system 里动一个字符，整段缓存作废，每轮都要重建）；**它是活的**（每 2 秒就变，写死进 system 等于又回到「给她一个假的自己」——ADR-0019 那次的教训）。`perception` 当初就是为这个才贴在末尾的，心情走同一条路。
+
+### 为什么平时要闭嘴
+
+一句「你现在心情平静」每轮都贴着，等于反复提醒她「你有个心情字段可以拿来说」。低于 0.12 就整个不贴，让她在没事的时候真的没有这件事。
+
+### 代价与边界
+
+- 0.12 以下是「平」：低唤醒的微妙状态（比如一点点失落）会被吞掉，她的语气不会因为它变。
+- 90 秒才过期：窗口最小化时页面还在报，所以只有页面关掉才会静默——「她刚睡醒」那几秒她的心情还是旧的。
+- **一句话改不了她的嘴**：prompt 里只说「带着它」，她完全可以无视（实测也出现过心情是 `dark_face` 却答「还行」）。要更稳得走 policy 那条线（人格蒸馏框架：voice 常驻、policy 在开口时决定），不是加提示词能解决的。
+- `mood` 与 `perception` 都是「每轮现读的回调」，这是这类事实该走的固定通道——以后凡是每轮都变的，都别塞 system。
+
+## ADR-0045 · 三把守门人焊在窗口上：卡片、串行、120 秒当不给
+
+- 状态：已实施（真机一轮：她说要列 `C:/Tools` → 窗口出现「她想列一下文件夹 / C:/Tools / 就这次 · 以后这个文件夹都给她看 · 不给」→ 用户点了 always → `C:/Users/Admin/.iris/file-roots.json` 多了一行 `C:/Tools`，工具继续跑完并报出目录内容）
+- 日期：2026-11-11
+
+### 背景
+
+ADR-0042 只给壳接了 `webTools()` + `screenTools()`，理由是文件 / 写 / 命令的授权模型是「问她要不要放开」（`FileGuard` / `WriteGuard` / `ShellGuard` 的 `approve` 回调），要在终端里问人，而壳里没有终端。用户 m09738 说：把那个弹窗搬进壳。
+
+### 决定
+
+`daemon.mjs` 里把 `approve` 焊在窗口上，三把守门人各自包一层：
+
+```
+askWindow(payload) → broadcast {type:"ask", phase:"ask", id, title, detail, why?, where?, options}
+                   → 页面 #ask 卡片（三个按钮）→ POST /answer {id, choice}
+                   → resolve "yes" | "always" | "no"
+```
+
+- **动词映射**：`list`「列一下文件夹」/ `search`「翻找内容」/ `read`「读里面的文件」；写是 `write` / `append` / `mkdir` / `move`；命令直接给整条 `detail`，`always` 那句话写成「以后 <命令头> 这类都放给她」。
+- **always 落到磁盘**：`fileGuard.allow(root, { persist: true })` / `writeGuard.allow(...)` / `shellGuard.remember(head)`，写的是 REPL 一直在用的那几本账（`~/.iris/file-roots.json` 等）——所以 REPL 里放开过的目录，壳里直接算放开（实测桌面 `C:/Users/Admin` 在册，她列桌面时一张卡都没弹）。
+- **授权面从守门人身上取**：`lookRoots: [...new Set([...fileGuard.roots, ...fileGuard.storedGrants])]`、`writeRoots: [...writeGuard.grants]`、`shellRoots: [...shellGuard.grants]`，不再另写一份配置——两处各写一份就会漂。
+- **串行**：`askQueue` 一次只让一张卡片出现（工具并行时会同时问两三个）。
+- **120 秒当不给**：没人看着就不放行。这是安全默认值，不是超时设置。
+- 卡片必须**计入输入区**（`reportRegion()` 里 `if (ask !== null && !ask.hidden) boxes.push(...)`）：窗口的输入区只喂了 `#stage` / `#grip` / `#caption` / `#composer`，卡片是后加的浮层，不喂进去按钮就是「画着但点不到」（鼠标会穿到桌面上）。
+
+### 中间态：ADR-0042 那条「37 秒像卡死」也一起修了
+
+页面加一颗横幅胶囊 `#busy`：工具在跑就说它在干什么（`TOOL_LABELS`：`look_at_screen` 在看你的屏幕、`web_search` 在上网查、`ls` 在看文件夹……），超过 3 秒带秒数（`在看你的屏幕 · 13 秒`）；有卡片在等答复时优先说「在等你点头」。数据不用新协议——`tool_start` / `tool_end` 早就广播了，页面维护一个运行中工具的栈，栈顶决定说什么。
+
+### 顺手修掉的 bug：字幕会跨轮拼接
+
+`main.ts` 在第一个 delta 上只 `pushDelta`，从没调用 `ui.startTurn()`，所以 `ui.ts` 里那个 `buffer` 不清空。用输入框发看不出问题（`submit()` 自己清过），**程序发起的轮次**（脚本 `POST /say`、`/speakup`）就会把上一轮的话接在新一轮前面——实测第一屏里「还行，有点闲得发慌……」和「你在 dump 游戏的符号……」粘在同一个字幕里。改成第一句 delta 时先 `ui.startTurn()`（顺带把输入框锁上，避免她说话时还能再发一条）。
+
+### 代价与边界
+
+- 只有三档。没有「只这一次，但记住这个位置」；也没有「拒绝并让她换个法子」——她拿到 `false` 之后要自己想别的路。
+- `always` 放开的是**整棵授权单位**（`C:/Tools` 被放开，它下面所有子目录都算），不是单次路径。
+- 120 秒是写死的，没有配置项；她连问三个目录就是三张卡、最长六分钟。
+- 页面没连上（SSE 客户端 0 个）时卡片没人看，只能等超时——没有声音、没有系统通知。
+- 这三套仍然**不是沙箱**：守门人只判「这个位置放不放」，判过之后工具照旧按自己的规则跑（命令还是按危险命令清单二次拦）。

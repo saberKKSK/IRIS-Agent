@@ -6,6 +6,17 @@ export type BridgeEvent =
 	| { type: "expression"; id: string }
 	| { type: "turn"; text: string; expression?: string | null; firstTokenMs: number; latencyMs: number; effort: string }
 	| { type: "tool"; toolName: string; phase: "start" | "end"; isError?: boolean }
+	| {
+			type: "ask";
+			id: string;
+			phase: "ask" | "done" | "timeout";
+			title?: string;
+			detail?: string;
+			why?: string;
+			where?: string;
+			options?: readonly { key: string; label: string }[];
+			choice?: string;
+	  }
 	| { type: "compact"; dropped: number }
 	| { type: "error"; message: string };
 
@@ -54,6 +65,17 @@ export class Bridge {
 
 	async speakUp(hint = ""): Promise<{ ok: boolean; reason?: string }> {
 		return this.post("/speakup", { hint });
+	}
+
+	/** 她问「能不能看这个文件夹」时，窗口里那张卡片按下去的那一下（ADR-0045）。 */
+	async answer(id: string, choice: "yes" | "always" | "no"): Promise<{ ok: boolean; reason?: string }> {
+		return this.post("/answer", { id, choice });
+	}
+
+	/** 这一刻的心情（ADR-0044）：页面算 VAD，daemon 转成一句话，每轮贴在对方那句话末尾。 */
+	async mood(mood: { valence: number; arousal: number; face: string | null; held: number }): Promise<void> {
+		const held = Number.isFinite(mood.held) ? mood.held : 999;
+		await this.post("/mood", { ...mood, held });
 	}
 
 	private async post(path: string, body: unknown): Promise<{ ok: boolean; reason?: string }> {
