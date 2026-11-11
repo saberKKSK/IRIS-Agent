@@ -117,6 +117,10 @@ const handle = (event: BridgeEvent): void => {
 		case "turn": {
 			streaming = false;
 			stage.setTalking(false);
+			// 一轮结束了就别再挂中间态：tool_end 少一条（工具抛了、或事件丢了）时
+			// 栈会把「在上网查」永远留在画面上，下一轮一开始就说不清了。
+			runningTools.length = 0;
+			refreshBusy();
 			const seconds = (event.latencyMs / 1000).toFixed(1);
 			const first = (event.firstTokenMs / 1000).toFixed(1);
 			ui.endTurn("首字 " + first + "s · 整轮 " + seconds + "s · " + event.effort);
@@ -158,6 +162,8 @@ const handle = (event: BridgeEvent): void => {
 		case "error":
 			streaming = false;
 			stage.setTalking(false);
+			runningTools.length = 0;
+			refreshBusy();
 			ui.setError(event.message);
 			break;
 	}

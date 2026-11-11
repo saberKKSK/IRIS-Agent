@@ -9,6 +9,14 @@
 	box-sizing: border-box;
 }
 
+/* hidden 要真的是「看不见」：下面几个块（#busy / #ask / #ask-why）自带 display: flex，
+   作者样式会盖掉浏览器默认的 [hidden] { display: none }，于是 JS 里设 hidden = true
+   只是打了个标记，画面上一动不动——工具早跑完了，「在上网查」却一直挂在字幕条上面，
+   等答复的卡片点完也不消失（2026-11-11 用户报的就是这个）。 */
+[hidden] {
+	display: none !important;
+}
+
 html,
 body {
 	margin: 0;

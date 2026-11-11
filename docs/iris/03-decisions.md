@@ -1273,6 +1273,16 @@ askWindow(payload) → broadcast {type:"ask", phase:"ask", id, title, detail, wh
 
 `main.ts` 在第一个 delta 上只 `pushDelta`，从没调用 `ui.startTurn()`，所以 `ui.ts` 里那个 `buffer` 不清空。用输入框发看不出问题（`submit()` 自己清过），**程序发起的轮次**（脚本 `POST /say`、`/speakup`）就会把上一轮的话接在新一轮前面——实测第一屏里「还行，有点闲得发慌……」和「你在 dump 游戏的符号……」粘在同一个字幕里。改成第一句 delta 时先 `ui.startTurn()`（顺带把输入框锁上，避免她说话时还能再发一条）。
 
+### 补记（2026-11-11）：`hidden` 根本不会隐藏，胶囊永远挂在画面上
+
+用户报「她的状态一直在显示一个 在上网查」。查下去是我们自己的 CSS bug，不是工具卡住：
+
+- `#busy` 的样式里写了 `display: flex`，`#ask` 与 `#ask-why` 同理。**作者样式会盖掉浏览器默认的 `[hidden] { display: none }`**（UA 样式表的优先级最低，跟选择器权重无关），于是 `ui.ts` 里 `busyBar.hidden = true` 只是打了个标记，元素照样渲染。
+- 症状：中间态胶囊永远显示**最后一次**的文案（工具跑完也还是「在上网查」、圆点继续脉冲），等答复的卡片点完也留在屏幕上。
+- 之前几轮「验证通过」全是读 `element.hidden`（属性），读的是代码的意图，不是画面——CDP 一读计算样式就露馅：`hidden=true` 而 `getComputedStyle(...).display === "flex"`。
+- 修法：`style.css` 顶部加一条 `[hidden] { display: none !important; }`，一处管住所有用 `hidden` 开关的块。另在 `main.ts` 的 `turn` 与 `error` 分支里清空 `runningTools` 并 `refreshBusy()`——万一某条 `tool_end` 丢了，也不至于把中间态带进下一轮。
+- 实测：发「帮我搜一下今天有什么 AI 新闻」后每 2 秒读一次——2 s `hidden/display=none`、**4 s 出现「在上网查」(flex)**、6 s 工具结束即 `none`，之后一直是 `none`；同一条查询 `首字 7.0s · 整轮 7.6s`。
+
 ### 代价与边界
 
 - 只有三档。没有「只这一次，但记住这个位置」；也没有「拒绝并让她换个法子」——她拿到 `false` 之后要自己想别的路。
