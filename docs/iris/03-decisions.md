@@ -227,7 +227,7 @@
   - 延迟来源是思考：`reasoning_effort: "none"` 也要 5.1 s 起，不吃时 8.4 s；1.6 MB 的图 13 s。
 - 代价：看图是**串行两趟**——先转述（8–13 s）再回话（1–2 s），一轮下来 10–15 s，不适合实时车道，只能挂在 async / background 车道。转述本身是二次失真：她的「看见」永远是别人替她念的一遍，长文截图里的小字、数字、表格她会当成真的。
 - 边界：只说转述里有的。图超过 5 MB 直接拒；小字数字一律不可信，要准就另做区域裁剪或 OCR。图片经过本机 Magpie 网关（127.0.0.1，不出本机）；换到外部网关就属于那个网关的隐私范围。
-- 状态：已定，已实施。
+- 状态：已定，已实施（**2026-11-11 起「转述」不再是唯一路径**：网关的 `deepseek/deepseek-flash` 已经能看图，主会话改成直接收原图，见 ADR-0047；`describeImage` 与这里的两段式保留成兜底，`IRIS_VISION=describe` 时仍走它）。
 ## ADR-0021 · 重启之后接着聊：把最近的原文接回 transcript
 
 - 背景（2026-11-09，用户 m02563 原话：「每次重启的历史的对话都没有了吗」）。答案是**一半对**：原话一句没丢，全在 SQLite 的 `messages` 表里（append-only，触发器拦着 UPDATE）；但 pi 的 `Agent` 每次启动都从空 transcript 起，只拿到 system prompt（人格 + 记忆 + 自我事实 + 风格）。结果就是她记得「我们聊过什么」的结论，接不上「刚才那句话」——重启后第一句永远是重新认识。
@@ -1323,3 +1323,41 @@ askWindow(payload) → broadcast {type:"ask", phase:"ask", id, title, detail, wh
 - **慢**：转述 8–13 s，全在这段时间里；`#busy` 有中间态，但第一个字要等这么久。
 - **inbox 只增不减**：`~/.iris/inbox/` 没有清理策略，一天拖几张就是几十 MB。它落在 `C:\Users\Admin` 底下，正好被现有的 file-roots 覆盖，所以「再看一眼那张图」不用再问一次。
 - **没验到的**：原生选图对话框（会弹模态框）与 `paste` 只在代码层看过，真机验的是拖入与脚本上传——三者走同一个 `sendImage`，但「点按钮会不会卡住焦点」没实测。
+
+## ADR-0047 · 眼睛不再借别人的嘴：原图直接进她的消息，她自己看
+
+- 状态：已实施（2026-11-11，真机三条路径验过；屏幕那条有一次她把工具写成了标签，之后两次正常）
+- 日期：2026-11-11
+
+### 背景
+
+用户 m10595：「她这个啥意思，还是不能自由的使用眼睛吗想看啥看啥」；m10599：「她本身就是多模态的LLM啊」。
+
+ADR-0020 立项时有一层硬前提：网关里能看图的只有 \`workbuddy-ai/hy4free\`，主模型 \`deepseek/deepseek-flash\` 收图返 200 但 content 空。2026-11-11 实测，这层前提没了：
+
+- 现画一张 900×340 的图（三行：\`74527\` / \`鲸鱼爱吃榴莲\` / \`第 3 行：小字 4291 号\`，最后那行 22 px），用 \`POST /v1/chat/completions\` + \`image_url\` data URI 问「逐行照抄，不要猜」：**\`deepseek/deepseek-flash\` 1596 ms 三行全对**，\`deepseek/deepseek-v4-pro\` 3445 ms 同样全对。同一轮里 \`commandcode/deepseek/deepseek-v4.1-flash\` 300 token 全花在 reasoning、content 空；\`workbuddy-ai/deepseek-v4.1-flash-sg\` HTTP 429。
+- 所以她的「看见」不必再经过一个转述者。转述同时是延迟（8–13 s）与失真的来源（小字、数字会被读错）。
+
+### 决定
+
+1. **模型声明收图**：\`model.ts\` 的 \`magpieModel()\`，\`input: ["text"]\` → **\`["text", "image"]\`**。这一条专管**工具结果里的图**：\`packages/ai/src/api/openai-completions.ts:1429\` 的 \`if (hasImages && model.input.includes("image"))\` 才把工具结果里的图发出去；用户消息那条路不看这个字段。不声明 = \`look_at_screen\` 的图永远发不出去，而 \`sayAbout\` 的图照发（看着像通了，其实是两条路）。
+2. **图直接进消息，不转述**：\`vision.ts\` 加 \`imageBlock()\`（→ \`{type:"image",data,mimeType}\`）与 \`seesInline()\`（\`IRIS_VISION\` 为 \`describe\`/\`off\`/\`0\` 时 false，默认 true）。\`session.ts\` 加 \`sayWith(input, images, hooks)\` → \`agent.prompt(input, images)\`（pi 的 \`packages/agent/src/agent.ts:380\` 的 \`normalizePromptInput\` 把图并进同一条 user 消息）；\`sayAbout()\` 在 \`seesInline()\` 时改用 \`attachedFrame(hint)\`（「（对方发来一张图，图就在这条消息里，你自己看）」）+ 原图，否则退回 \`imageFrame(note, hint)\` 那条老转述路。
+3. **\`read\` 撞上图也交原图**：\`files.ts\` 的 \`read\` 认出 \`isImagePath()\` 后，inline 时返回 \`[{type:"text", text:"<路径>（这是一张图，图就在这条结果里，你自己看）"}, imageBlock(loadImage(path))]\`；否则还是 \`describeImage()\` 转述成一句。
+4. **看屏幕换成她自己的眼睛**：\`screen.ts\` 在 inline 时抓 **1600 宽 / 质量 80**（512 宽是给转述定的，她自己看读不出界面上的小字），把图直接放进工具结果；\`ScreenToolOptions.vision\`（\`"inline" | "describe"\`）是测试缝，缺省跟 \`seesInline()\`。工具 description 也跟着分叉：inline 版不再说「8 到 18 秒」。
+5. **图只留最近一轮**：\`foldSeenImages()\` 把旧消息里的 image 块换成 \`〔图，之前看过了〕\`。分界线取「最后一条 user 消息」而不是记下来的下标（压过上下文之后下标会漂）。不折的话每一轮都要为同一张图再付一次图像 token。
+6. **prompt 按有没有原图分叉**：\`persona.ts\` 的 \`PromptContext.visionInline\`，「## 你能看文件」「## 你能看屏幕」两段各写两版。inline 版明说「图进来就是那张图本身，你自己看」「小字可能糊，看不清就说看不清」。
+
+### 实测
+
+- **上传一张随机文字图**（\`.artifacts/eyes-random.png\`）问「这张图里有三行字，逐行照着念出来，别猜」：0.6 s 起 \`look_at_image\`、**3.3 s 首字**，三行一字不差（\`74527\` / \`鲸鱼爱吃榴莲\` / \`第 3 行：小字 4291 号\`），末了补一句「这回是我自己看的」。旧路同一张图要走 hy4free 转述 8–13 s，且念不出精确数字。
+- **看屏幕**（壳里两轮）：\`look_at_screen\` 2.2–3.2 s 抓完，她把屏幕上的东西说对了——包括 DSH 窗口里「正在运行命令：Retry screen look in daemon」「用时 16 分 32 秒」，以及桌面那排 Adobe 图标。整轮 6.8–9.4 s。
+- 校验：\`npm test\` **246/246**、\`tsc -p packages/iris-core/tsconfig.check.json\` 0、\`biome check packages/iris-core\` 0、\`apps/desktop\` 的 \`bunx tsc --noEmit\` 0。
+
+### 代价与边界
+
+- **只有最近一轮的图是图**：折成文本之后她只剩「看过」这件事，想问细节得重发一张。
+- **图像 token 是真的贵**：1600 宽的截图一张就是上万 token 量级，连着看几次上下文就满，压缩器会连着图一起压掉。
+- **模型换不得**：\`input\` 声明了收图，换到看不了图的模型必须显式 \`IRIS_VISION=describe\`，否则图发过去只会拿回空 content（ADR-0020 记过这个坑）。
+- **她看不清的还是看不清**：小字、缩略图里的数字照样会错。prompt 里写的是「小字可能糊，看不清就说看不清」，不是「她什么都能读」。
+- **已知抖动**（2026-11-11 11:2x）：第一次问「看看我正在看什么」，她把这次调用写成了正文 \`<look_at_screen></look_at_screen>\`，一次 \`tool_start\` 都没发；同一条 daemon、同一套工具，之后两次都正常调用。判断是模型偶发把工具调用吐成文本，不是工具没接上——persona 里加了一句「工具名别写成 \`<...>\` 放进正文」，没有做重试兜底。
+

@@ -40,6 +40,28 @@ export interface VisionImage {
 	mimeType: string;
 }
 
+/**
+ * 这张图本身，直接塞进消息里给她看（ADR-0047）。
+ *
+ * pi 的 user 消息与 toolResult 都收 ImageContent，OpenAI 适配器会把它转成
+ * `{type:"image_url", url:"data:<mime>;base64,…"}`——和本机网关收得下的格式一致。
+ */
+export function imageBlock(image: VisionImage): ImageContent {
+	return { type: "image", data: image.data, mimeType: image.mimeType };
+}
+
+/**
+ * 她现在是自己看，还是老样子听转述。
+ *
+ * 2026-11-11 实测网关的 deepseek-flash 能看图了，所以默认把图直接给她；
+ * 模型换回不能看图的、或者想省 token 时，设 `IRIS_VISION=describe` 退回
+ * hy4free 转述那条老路（ADR-0020）。
+ */
+export function seesInline(): boolean {
+	const how = process.env.IRIS_VISION?.trim().toLowerCase();
+	return how !== "describe" && how !== "off" && how !== "0";
+}
+
 /** 一眼之后留下的东西：转述文本 + 够算预算的计数。 */
 export interface VisionNote {
 	text: string;

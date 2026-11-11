@@ -16,10 +16,20 @@ import { existsSync, mkdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import { describeImage, loadImage, type VisionNote } from "./vision.ts";
+import { describeImage, imageBlock, loadImage, seesInline, type VisionNote } from "./vision.ts";
 
 /** 缩略宽度：再小就看不出字了，再大就慢（512 宽 8.7 s / 768 宽 15.4 s / 原图 18.2 s）。 */
 export const SCREEN_WIDTH = 512;
+
+/**
+ * 她自己看屏幕时用的宽度（ADR-0047）。
+ *
+ * 512 宽是给「转述」那条路定的——翻成几句话够用，但界面上的字全糊了，她自己看也读不出来。
+ * 1600 宽、质量 80 大约 200 KB，抓拍本身不变慢（缩放在 ffmpeg 里一步做完），
+ * 多出来的只有模型那边的 token。
+ */
+export const INLINE_SCREEN_WIDTH = 1600;
+export const INLINE_SCREEN_QUALITY = 80;
 
 /** JPEG 质量。65 时 512 宽约 29 KB，够看清版面和大字。 */
 export const SCREEN_QUALITY = 65;
@@ -245,6 +255,8 @@ export interface ScreenToolDetails {
 	captureMs?: number;
 	visionMs?: number;
 	lines?: number;
+	/** true = 图直接给了她看；false = 走的 hy4free 转述那条老路。 */
+	inline?: boolean;
 	error?: string;
 }
 
@@ -255,6 +267,8 @@ export interface ScreenToolOptions {
 	describe?: DescribeFn;
 	width?: number;
 	quality?: number;
+	/** 她自己是看图还是听转述（ADR-0047）。不给就跟着 `IRIS_VISION` 走。 */
+	vision?: "inline" | "describe";
 }
 
 function failed(message: string, path?: string): AgentToolResult<ScreenToolDetails> {
@@ -275,6 +289,7 @@ function promptFor(question: string | undefined): string {
 /** 给她一只看屏幕的眼睛：一件 look_at_screen。 */
 export function screenTools(options: ScreenToolOptions = {}): AgentTool[] {
 	const capture = options.capture ?? captureScreen;
+	const inline = options.vision === "inline" ? true : options.vision === "describe" ? false : seesInline();
 	const describe: DescribeFn =
 		options.describe ??
 		(async (frame, call) =>
@@ -286,8 +301,9 @@ export function screenTools(options: ScreenToolOptions = {}): AgentTool[] {
 	const look: AgentTool = {
 		name: "look_at_screen",
 		label: "看一眼屏幕",
-		description:
-			"看他现在屏幕上的画面（整块屏幕，缩略图）。他让你看屏幕、问你在看什么、他自己描述屏幕上的东西时用它。慢，一次 8 到 18 秒，别连着看第二眼；看一眼就说你看到了什么，别报界面细节。",
+		description: inline
+			? "看他现在屏幕上的画面（整块屏幕的截图，图会直接给你看）。他让你看屏幕、问你在看什么、他自己描述屏幕上的东西时用它。截图本身一秒多，但还是别连着看——看一眼就够，看完直接说你看到了什么。"
+			: "看他现在屏幕上的画面（整块屏幕，缩略图）。他让你看屏幕、问你在看什么、他自己描述屏幕上的东西时用它。慢，一次 8 到 18 秒，别连着看第二眼；看一眼就说你看到了什么，别报界面细节。",
 		parameters: {
 			type: "object",
 			properties: {
@@ -303,16 +319,49 @@ export function screenTools(options: ScreenToolOptions = {}): AgentTool[] {
 			const question = typeof args.question === "string" ? args.question : undefined;
 			let frame: CapturedFrame;
 			try {
+				// 她自己看时要给足分辨率，不然界面上的字她读不出来（ADR-0047）。
+				const width = options.width ?? (inline ? INLINE_SCREEN_WIDTH : undefined);
+				const quality = options.quality ?? (inline ? INLINE_SCREEN_QUALITY : undefined);
 				frame = await capture(
-					options.width === undefined && options.quality === undefined
+					width === undefined && quality === undefined
 						? undefined
 						: {
-								...(options.width === undefined ? {} : { width: options.width }),
-								...(options.quality === undefined ? {} : { quality: options.quality }),
+								...(width === undefined ? {} : { width }),
+								...(quality === undefined ? {} : { quality }),
 							},
 				);
 			} catch (error) {
 				return failed(error instanceof Error ? error.message : String(error));
+			}
+			if (inline) {
+				try {
+					const seen = loadImage(frame.path);
+					return {
+						content: [
+							{
+								type: "text",
+								text:
+									"他此刻的屏幕就在这条结果里（缩到 " +
+									frame.width +
+									" 宽），你自己看" +
+									(question === undefined ? "" : "：" + question),
+							},
+							imageBlock(seen),
+						],
+						details: {
+							ok: true,
+							action: "look",
+							path: frame.path,
+							bytes: frame.bytes,
+							captureMs: frame.ms,
+							visionMs: 0,
+							lines: 0,
+							inline: true,
+						},
+					};
+				} catch (error) {
+					return failed(error instanceof Error ? error.message : String(error), frame.path);
+				}
 			}
 			let note: VisionNote;
 			try {
@@ -330,6 +379,7 @@ export function screenTools(options: ScreenToolOptions = {}): AgentTool[] {
 					captureMs: frame.ms,
 					visionMs: note.latencyMs,
 					lines: note.text.length,
+					inline: false,
 				},
 			};
 		},

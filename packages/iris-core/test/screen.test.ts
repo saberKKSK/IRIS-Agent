@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import { buildSystemPrompt, type PromptContext } from "../src/persona.ts";
-import { type CapturedFrame, DEFAULT_SCREEN_PROMPT, type DescribeFn, screenTools } from "../src/screen.ts";
+import {
+	type CapturedFrame,
+	DEFAULT_SCREEN_PROMPT,
+	type DescribeFn,
+	INLINE_SCREEN_WIDTH,
+	screenTools,
+} from "../src/screen.ts";
 import type { VisionNote } from "../src/vision.ts";
 
 function frame(): CapturedFrame {
@@ -20,6 +29,7 @@ describe("看屏幕（ADR-0036）", () => {
 	it("把屏幕上看到的东西原样交回来", async () => {
 		const prompts: string[] = [];
 		const look = screenTools({
+			vision: "describe",
 			capture: async () => frame(),
 			describe: async (_frame, call) => {
 				prompts.push(call?.prompt ?? "");
@@ -41,6 +51,7 @@ describe("看屏幕（ADR-0036）", () => {
 	it("他给了问题就照他的问题问，问法自己会收口", async () => {
 		const prompts: string[] = [];
 		const look = screenTools({
+			vision: "describe",
 			capture: async () => frame(),
 			describe: async (_frame, call) => {
 				prompts.push(call?.prompt ?? "");
@@ -50,6 +61,36 @@ describe("看屏幕（ADR-0036）", () => {
 		await look.execute("call-2", { question: "那行报错写的什么" });
 		assert.match(prompts[0], /^那行报错写的什么/u);
 		assert.match(prompts[0], /三句以内/u);
+	});
+
+	it("把她自己看着的那张屏幕图直接交回去（ADR-0047）", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "iris-screen-inline-"));
+		const shot = join(dir, "shot.png");
+		// 一张真 PNG 的头 + 一点数据：够 loadImage 读出来，不用真画一张
+		writeFileSync(
+			shot,
+			Buffer.from(
+				"89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6300010000050001",
+				"hex",
+			),
+		);
+		const asked: (number | undefined)[] = [];
+		const look = screenTools({
+			vision: "inline",
+			capture: async (options) => {
+				asked.push(options?.width);
+				return { path: shot, bytes: 12, width: options?.width ?? 512, height: 60, ms: 700 };
+			},
+		})[0];
+		const result = await look.execute("call-5", { question: "图里那行报错写的什么" });
+		assert.equal(result.details?.ok, true);
+		assert.equal(result.details?.inline, true);
+		// 她自己看的时候要按大图抓，不然界面上的字读不出来
+		assert.equal(asked[0], INLINE_SCREEN_WIDTH);
+		const image = result.content.find((block) => block.type === "image");
+		assert.ok(image !== undefined, "结果里得真有那张图");
+		assert.equal((image as { mimeType: string }).mimeType, "image/png");
+		assert.match(textOf(result), /图里那行报错写的什么/u);
 	});
 
 	it("偷不到屏幕就说偷不到，不抛", async () => {
@@ -69,7 +110,7 @@ describe("看屏幕（ADR-0036）", () => {
 		const describeFail: DescribeFn = async () => {
 			throw new Error("视觉模型什么都没说（这张图可能超出它的能力）");
 		};
-		const look = screenTools({ capture: async () => frame(), describe: describeFail })[0];
+		const look = screenTools({ vision: "describe", capture: async () => frame(), describe: describeFail })[0];
 		const result = await look.execute("call-4", {});
 		assert.equal(result.isError, true);
 		assert.match(textOf(result), /什么都没说/u);
@@ -100,9 +141,15 @@ describe("看屏幕（ADR-0036）", () => {
 			now: new Date(2026, 10, 10, 11, 0).getTime(),
 		};
 		assert.doesNotMatch(buildSystemPrompt(base), /你能看屏幕/u);
-		const seeing = buildSystemPrompt({ ...base, canSee: true });
-		assert.match(seeing, /## 你能看屏幕/u);
-		assert.match(seeing, /8 到 18 秒/u);
+		// 老路：拿回的是别人写的转述，所以要提醒她别把转述里没有的说成看见的。
+		const described = buildSystemPrompt({ ...base, canSee: true, visionInline: false });
+		assert.match(described, /## 你能看屏幕/u);
+		assert.match(described, /8 到 18 秒/u);
+		assert.match(described, /他没提屏幕/u);
+		// 现在：图直接给她看（ADR-0047），不再提「转述」，也不再提那个十几秒。
+		const seeing = buildSystemPrompt({ ...base, canSee: true, visionInline: true });
+		assert.match(seeing, /图直接给你看/u);
+		assert.doesNotMatch(seeing, /8 到 18 秒/u);
 		assert.match(seeing, /他没提屏幕/u);
 	});
 });

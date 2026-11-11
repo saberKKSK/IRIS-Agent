@@ -32,10 +32,10 @@ const CORE = resolve(here, "../../../packages/iris-core");
 const PORT = Number(process.env.IRIS_DESKTOP_PORT ?? 5274);
 const MODEL_DIR = process.env.IRIS_LIVE2D_DIR ?? "C:/IRIS Agent/assets/live2d/大肥鱼/DeepSeek";
 
-// —— 他发来的图（ADR-0020 的用法之一）。
+// —— 他发来的图（ADR-0020 → ADR-0047）。
 // 他拍一张、拖一张、粘贴一张，页面把字节发到这里；落盘进 ~/.iris/inbox/，
-// 再交给 sayAbout：先过眼睛转述，再把人话当他说的话交给她。她从来看不到图本身，
-// 看到的是眼睛写下的那几行——跟她看屏幕时是同一条路。
+// 再交给 sayAbout：图本身进她的消息，她自己看（2026-11-11 起主模型就是多模态的；
+// IRIS_VISION=describe 才会退回「眼睛转述成几行字」那条老路）。
 const INBOX = join(homedir(), ".iris", "inbox");
 const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;

@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSyn
 import { homedir } from "node:os";
 import { dirname, extname, join, resolve, sep } from "node:path";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import { type DescribeOptions, describeImage, isImagePath, loadImage } from "./vision.ts";
+import { type DescribeOptions, describeImage, imageBlock, isImagePath, loadImage, seesInline } from "./vision.ts";
 
 export type FileAction = "list" | "read" | "search";
 
@@ -772,7 +772,7 @@ export function fileTools(options: FileToolOptions = {}): AgentTool[] {
 		name: "read",
 		label: "看一个文件",
 		description:
-			"读一个文件。文本文件默认从头读 200 行，可以指定从第几行开始、读多少行。png / jpg / webp / gif 这些图也能读——会交给眼睛转述成几句话，回来是字，不是图。只能读他同意过的文件夹里的文件。",
+			"读一个文件。文本文件默认从头读 200 行，可以指定从第几行开始、读多少行。png / jpg / webp / gif 这些图也能读——图会直接给你看（截图、照片、界面上的字都能看）。只能读他同意过的文件夹里的文件。",
 		parameters: {
 			type: "object",
 			properties: {
@@ -791,11 +791,22 @@ export function fileTools(options: FileToolOptions = {}): AgentTool[] {
 			}
 			const verdict = await guard.check("read", asked);
 			if (!verdict.ok) return failed(asFileError(verdict), "read", asked);
-			// 图片走眼睛（ADR-0020）：说话的那个人看不了图，读成 base64 塞进对话是乱码。
-			// 所以 read 撞上图就交给 vision，回来的照旧是几行字——她说话的方式不用改。
+			// 图片：她自己看（ADR-0047）。图跟着工具结果一起回去，模型收到的是像素。
+			// 只有 `IRIS_VISION=describe` 时才回到老路——转述成几句话（ADR-0020）。
 			if (isImagePath(verdict.path)) {
 				try {
-					const note = await describeImage(loadImage(verdict.path), options.image ?? {});
+					const loaded = loadImage(verdict.path);
+					if (seesInline()) {
+						guard.noteSeen(verdict.path);
+						return {
+							content: [
+								{ type: "text", text: verdict.path + "（这是一张图，图就在这条结果里，你自己看）" },
+								imageBlock(loaded),
+							],
+							details: { ok: true, action: "read", path: verdict.path },
+						};
+					}
+					const note = await describeImage(loaded, options.image ?? {});
 					guard.noteSeen(verdict.path);
 					return {
 						content: [{ type: "text", text: verdict.path + "（这是一张图，我看了一眼：" + note.text + "）" }],

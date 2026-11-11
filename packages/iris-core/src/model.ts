@@ -62,7 +62,10 @@ export function magpieModel(options: { model?: string; baseUrl?: string } = {}):
 		api: "openai-completions",
 		provider: "magpie",
 		baseUrl: options.baseUrl ?? process.env.MAGPIE_BASE_URL ?? MAGPIE_BASE_URL,
-		input: ["text"],
+		// 2026-11-11 实测：网关上的 deepseek-flash 已经能看图（随机三行字、22 px 小字都读对，
+		// 1.6 s），ADR-0020「主对话模型看不了图」那个前提作废了（见 ADR-0047）。所以这里声明收图，
+		// 图会被 pi 的 OpenAI 适配器转成 image_url 塞进消息——她看的是像素，不是别人写的转述。
+		input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		reasoning: false,
 		contextWindow: 128_000,

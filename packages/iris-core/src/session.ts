@@ -11,7 +11,7 @@
 
 import type { AgentEvent, AgentMessage, AgentTool, StreamFn } from "@earendil-works/pi-agent-core";
 import { Agent } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, SimpleStreamOptions, Usage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ImageContent, SimpleStreamOptions, Usage } from "@earendil-works/pi-ai";
 import { createInitialSystemMessage, toToolDeclaration } from "@earendil-works/pi-ai";
 import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
@@ -53,7 +53,7 @@ import {
 import { renderStyle } from "./style.ts";
 import type { Episode, Persona, PersonaState, Relationship } from "./types.ts";
 import type { DescribeOptions, VisionImage, VisionNote } from "./vision.ts";
-import { describeImage, loadImage } from "./vision.ts";
+import { describeImage, imageBlock, loadImage, seesInline } from "./vision.ts";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_RECENT = 5;
@@ -468,6 +468,7 @@ export class IrisSession {
 	private promptDay = "";
 	/** 她上一轮说的话。用来认「要不我查一下？」这种自己答应的事。 */
 	private lastReply: string | null = null;
+
 	/** 自动档位（ADR-0031）：关掉时这一轮永远走 `reasoningEffort`。 */
 	private readonly autoEffort: boolean;
 	private readonly effortOptions: EffortOptions;
@@ -643,6 +644,11 @@ export class IrisSession {
 		return await this.runTurn(input, hooks, false);
 	}
 
+	/** 带着图说一句：图进的是同一条 user 消息，模型那边收到的就是像素（ADR-0047）。 */
+	private async sayWith(input: string, images: ImageContent[], hooks: IrisSessionHooks): Promise<IrisTurn> {
+		return await this.runTurn(input, hooks, false, images);
+	}
+
 	/**
 	 * 她自己开口（ADR-0037）：没人跟她说话，但她想说了。
 	 *
@@ -660,7 +666,12 @@ export class IrisSession {
 		return await this.runTurn(SELF_START + tail + "）", hooks, true);
 	}
 
-	private async runTurn(input: string, hooks: IrisSessionHooks, internal: boolean): Promise<IrisTurn> {
+	private async runTurn(
+		input: string,
+		hooks: IrisSessionHooks,
+		internal: boolean,
+		images?: readonly ImageContent[],
+	): Promise<IrisTurn> {
 		if (this.agent.state.isStreaming) await this.agent.waitForIdle();
 		// 跨夜了就把日期那一行换掉，否则第二天她还拿着昨天的 prompt 说今天（实测把周二说成周四）。
 		if (this.promptDay !== dayStamp(this.clock())) this.refreshPrompt();
@@ -708,7 +719,7 @@ export class IrisSession {
 		};
 
 		try {
-			await this.agent.prompt(promptInput);
+			await this.agent.prompt(promptInput, images === undefined ? undefined : [...images]);
 			await this.agent.waitForIdle();
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -817,8 +828,8 @@ export class IrisSession {
 	}
 
 	/**
-	 * 看一眼图：只拿转述，不把图塞进对话（ADR-0020）。
-	 * 说话的人是 deepseek-flash，看不了图；这一步换 hy4free 当眼睛。
+	 * 看一眼图，只要几句转述（`IRIS_VISION=describe` 那条老路的入口，ADR-0020）。
+	 * 默认不再走这里：图她自己看（ADR-0047）。
 	 */
 	async look(image: VisionImage | string, options: DescribeOptions = {}): Promise<VisionNote> {
 		const loaded = typeof image === "string" ? loadImage(image) : image;
@@ -826,12 +837,19 @@ export class IrisSession {
 	}
 
 	/**
-	 * 对方发来一张图：先转述，再把转述交给她当对方说的话。
-	 * 回复仍然由人格模型出 —— 眼睛和嘴不是一个模型，她照自己的脾气接。
+	 * 对方发来一张图。
+	 *
+	 * 默认把图本身交给她看（ADR-0047）：她能看见像素，不是别人替她念的一段话。
+	 * `IRIS_VISION=describe` 时退回老路——先转述，再把转述当她收到的话（ADR-0020），
+	 * 那条路只在模型看不了图时才有意义。
 	 */
 	async sayAbout(image: VisionImage | string, hint = "", hooks: IrisSessionHooks = {}): Promise<IrisTurn> {
-		const note = await this.look(image);
-		return this.say(imageFrame(note, hint), hooks);
+		const loaded = typeof image === "string" ? loadImage(image) : image;
+		if (!seesInline()) {
+			const note = await this.look(loaded);
+			return this.say(imageFrame(note, hint), hooks);
+		}
+		return this.sayWith(attachedFrame(hint), [imageBlock(loaded)], hooks);
 	}
 
 	/** 打断当前这一轮（用户插话、关窗）。 */
@@ -999,6 +1017,7 @@ export class IrisSession {
 			...(this.hasWriteTools() ? { canWrite: true } : {}),
 			...(this.hasWriteTools() && this.writeRoots.length > 0 ? { writeRoots: this.writeRoots } : {}),
 			...(this.toolNames.has("look_at_screen") ? { canSee: true } : {}),
+			visionInline: seesInline(),
 			...(this.toolNames.has("look_at_screen") && this.perception !== undefined ? { perception: true } : {}),
 			...(this.mood === undefined ? {} : { mood: true }),
 			...(this.toolNames.has("run_command") ? { canShell: true } : {}),
@@ -1061,7 +1080,13 @@ export class IrisSession {
 	private async prepareHistory(messages: readonly AgentMessage[]): Promise<AgentMessage[]> {
 		// 最后一条是本轮刚发出去的：那句脚注得让它看见，否则等于没加。
 		const last = messages.length - 1;
-		const cleaned = messages.map((message, index) => (index === last ? message : stripNudge(message)));
+		// 上一轮看过的图折成一句：她记得自己看过，但不用再看一遍（ADR-0047）。
+		// 分界线取「最后一条 user 消息」而不是记下来的下标——压过上下文之后下标会漂。
+		const turnStart = lastUserIndex(messages);
+		const cleaned = messages.map((message, index) => {
+			if (index === last) return message;
+			return foldSeenImages(stripNudge(message), turnStart >= 0 && index < turnStart);
+		});
 		const compacted = this.compactor === null ? cleaned : await this.compactor.compact(cleaned);
 		return stampMoment(compacted, momentNote(this.clock()) + this.perceptionNote() + this.moodNote());
 	}
@@ -1173,6 +1198,39 @@ export class IrisSession {
 				return;
 		}
 	}
+}
+
+/** 最后一条 user 消息在哪：它以及它后面的消息属于这一轮，图要留着（ADR-0047）。 */
+function lastUserIndex(messages: readonly AgentMessage[]): number {
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		if (messages[index].role === "user") return index;
+	}
+	return -1;
+}
+
+/** 图就在消息里、她自己看时用的那一句（ADR-0047）。 */
+export function attachedFrame(hint = ""): string {
+	const tail = hint.trim().length > 0 ? "：" + hint.trim() : "";
+	return "（对方发来一张图，图就在这条消息里，你自己看" + tail + "）";
+}
+
+/**
+ * 把一条消息里的图换成一句「看过了」。
+ *
+ * `older` 为 false 时原样返回——这一轮的图还得留着（她可能还要再看一眼）。
+ * toolResult 里也有图（read 一张 png、看屏幕），同一条规则：过了那一轮就折。
+ */
+export function foldSeenImages(message: AgentMessage, older: boolean): AgentMessage {
+	if (!older) return message;
+	const content = (message as { content?: unknown }).content;
+	if (!Array.isArray(content)) return message;
+	if (!content.some((block) => (block as { type?: string }).type === "image")) return message;
+	const blocks = content.map((block) =>
+		(block as { type?: string }).type === "image"
+			? ({ type: "text", text: "〔图，之前看过了〕" } as const)
+			: (block as never),
+	);
+	return { ...message, content: blocks } as AgentMessage;
 }
 
 /** 把「看到的东西」包成对方说的话：转述 + 用户可能附带的一句。 */
