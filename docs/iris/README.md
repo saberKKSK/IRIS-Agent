@@ -12,9 +12,9 @@ IRIS（伊里斯）是建立在 pi 之上的**娱乐型 / 陪伴型智能体**�
 | [04-consent.md](04-consent.md) | 授权、披露与红线 |
 | [05-memory.md](05-memory.md) | 记忆分层与检索策略 |
 
-> 记忆生命周期的**实现口径**看 [03-decisions.md](03-decisions.md) 的 ADR-0014（原文永久归档 + 三档 + 时间轴）、ADR-0015（先不建向量库，FTS5 单字+二元组 + 实体加权）、ADR-0016（不设人工确认，写入即生效）；**语料风格**看 ADR-0017；**联网**看 ADR-0024，**「她说搜过了就得真搜」**看 ADR-0025，**只读文件三件**看 ADR-0026 / ADR-0027，**点赞与评论不设人工闸门**看 ADR-0028，**私信只回名单上的人**看 ADR-0029 / ADR-0030，**思考档位自动选**看 ADR-0031，**权限一次点头管到底（她可以自己开口要）**看 ADR-0033，**写权限与读权限分两本账**看 ADR-0034，**自己跑命令**看 ADR-0035，**看屏幕**看 ADR-0036，**一直看着屏幕并自己开口**看 ADR-0037，**接得下去与允许翻车**看 ADR-0038，**桌面壳（Electron + Live2D）**看 ADR-0039，**壳换成 MyGo 与整窗透明的坑**看 ADR-0040；**表情由她自己选（正文里的 `<脸红>` 是标记）**看 ADR-0041，**壳里给她接了什么工具**看 ADR-0042，**情绪是状态不是标签（VAD + 残留）**看 ADR-0043，**心情进 prompt（每轮末尾一句）**看 ADR-0044，**文件 / 写 / 命令的授权卡片搬进窗口**看 ADR-0045。
+> 记忆生命周期的**实现口径**看 [03-decisions.md](03-decisions.md) 的 ADR-0014（原文永久归档 + 三档 + 时间轴）、ADR-0015（先不建向量库，FTS5 单字+二元组 + 实体加权）、ADR-0016（不设人工确认，写入即生效）；**语料风格**看 ADR-0017；**联网**看 ADR-0024，**「她说搜过了就得真搜」**看 ADR-0025，**只读文件三件**看 ADR-0026 / ADR-0027，**点赞与评论不设人工闸门**看 ADR-0028，**私信只回名单上的人**看 ADR-0029 / ADR-0030，**思考档位自动选**看 ADR-0031，**权限一次点头管到底（她可以自己开口要）**看 ADR-0033，**写权限与读权限分两本账**看 ADR-0034，**自己跑命令**看 ADR-0035，**看屏幕**看 ADR-0036，**一直看着屏幕并自己开口**看 ADR-0037，**接得下去与允许翻车**看 ADR-0038，**桌面壳（Electron + Live2D）**看 ADR-0039，**壳换成 MyGo 与整窗透明的坑**看 ADR-0040；**表情由她自己选（正文里的 `<脸红>` 是标记）**看 ADR-0041，**壳里给她接了什么工具**看 ADR-0042，**情绪是状态不是标签（VAD + 残留）**看 ADR-0043，**心情进 prompt（每轮末尾一句）**看 ADR-0044，**文件 / 写 / 命令的授权卡片搬进窗口**看 ADR-0045，**图能进对话（`read` 认图、壳里选图/粘贴/拖入）**看 ADR-0046。
 
-代码起点：`packages/iris-core`（已可运行，232 个测试）。模块：`types`（词汇表）/ `persona`（四层人格→prompt）/ `memory`（内存版 Episode 表）/ `archive`（SQLite 原文归档 + 三档生命周期 + 无向量检索）/ `distill`（模型分档 + 提炼成短事实）/ `style`（语料导入 → 说话方式档案）/ `model`（Magpie，主对话 + 视觉两个 endpoint 描述）/ `vision`（看图 → 转述）/ `context`（上下文满了压成记忆）/ `web`（联网：搜索与抓页）/ `files`（只读文件三件 + 要权限 + 授权闸门）/ `write`（写五件：写 / 追加 / 建目录 / 改名搬家 / 要写权限）/ `shell`（命令执行一件：只读的直接跑，其余问他，地方跟着写权限走）/ `screen`（看屏幕：抓一张缩略图交给视觉模型转述）/ `perception`（一直看着屏幕：20 秒瞥一眼，变了才重新描述，给他空闲时她自己开口）/ `lines`（输入队列）/ `douyin`（刷抖音：推荐流 / 评论 / 点爱心 / 发一条 / 私信只回名单上的人）/ `browser`（借插件那台无头 Chrome 在页面里发请求）/ `effort`（这一轮该想多深：规则优先，分类模型可选）/ `complete`（一次纯文本补全，几个模块共用）/ `session`（pi `Agent` 会话层）。
+代码起点：`packages/iris-core`（已可运行，245 个测试）。模块：`types`（词汇表）/ `persona`（四层人格→prompt）/ `memory`（内存版 Episode 表）/ `archive`（SQLite 原文归档 + 三档生命周期 + 无向量检索）/ `distill`（模型分档 + 提炼成短事实）/ `style`（语料导入 → 说话方式档案）/ `model`（Magpie，主对话 + 视觉两个 endpoint 描述）/ `vision`（看图 → 转述）/ `context`（上下文满了压成记忆）/ `web`（联网：搜索与抓页）/ `files`（只读文件三件 + 要权限 + 授权闸门）/ `write`（写五件：写 / 追加 / 建目录 / 改名搬家 / 要写权限）/ `shell`（命令执行一件：只读的直接跑，其余问他，地方跟着写权限走）/ `screen`（看屏幕：抓一张缩略图交给视觉模型转述）/ `perception`（一直看着屏幕：20 秒瞥一眼，变了才重新描述，给他空闲时她自己开口）/ `lines`（输入队列）/ `douyin`（刷抖音：推荐流 / 评论 / 点爱心 / 发一条 / 私信只回名单上的人）/ `browser`（借插件那台无头 Chrome 在页面里发请求）/ `effort`（这一轮该想多深：规则优先，分类模型可选）/ `complete`（一次纯文本补全，几个模块共用）/ `session`（pi `Agent` 会话层）。
 
 ## 跑起来
 
@@ -31,7 +31,7 @@ npm run build
 
 ```bash
 cd packages/iris-core
-node --test test/*.test.ts                    # 232/232
+node --test test/*.test.ts                    # 245/245
 node examples/archive-day.ts                  # 离线：三档记忆 + 自动升级 + 无向量检索 + 过期
 node examples/live-turn.ts "今天下班有点累"      # 真模型：走本机 Magpie
 node examples/remember.ts "记住这个：我对花生过敏"  # 真模型：写入 ~/.iris/iris.db
@@ -50,7 +50,7 @@ npm run look -- 截图.png                       # 看图：先转述，再让�
 npm run look -- 截图.png --note-only           # 只看转述，不让她说话
 ```
 
-桌面壳（`apps/desktop`，ADR-0039 → 壳已换成 MyGo，见 ADR-0040）：皮套是《DeepSeek-chan（大肥鱼）》，**许可禁止再分发，模型不进 git**——放在 `C:\IRIS Agent\assets\live2d\大肥鱼\DeepSeek`，由 Go 侧注册的 `live2d://` 自定义协议直接喂给 WebView2（Windows 上是 `http://live2d.localhost/…`），找不到时退回 daemon 的 `/live2d`。窗口、穿透、拖窗、daemon 拉起都在 Go 里；页面还是那套 Pixi 8 + Live2D。壳里的 daemon 给她接了 `webTools()` + `screenTools()`（ADR-0042）以及 `fileTools()` / `writeTools()` / `shellTools()`——后三套的授权模型是「问她要不要放开」，壳里没有终端，所以那个 `approve` 回调被焊在窗口上：她要碰没放开的文件夹就弹一张卡片（就这次 / 以后都放开 / 不给），点了才继续，**120 秒没人答就当不给**（ADR-0045）。工具在跑时字幕上方有一颗胶囊说它在干什么（`在看你的屏幕 · 13 秒`），有卡片在等答复时改说「在等你点头」。她此刻的心情由页面每 2 秒报给 daemon（`/mood`），daemon 把 (愉悦, 兴奋, 脸, 挂了多久) 翻成一句人话，内核每轮贴在对方那句话末尾（ADR-0044）。
+桌面壳（`apps/desktop`，ADR-0039 → 壳已换成 MyGo，见 ADR-0040）：皮套是《DeepSeek-chan（大肥鱼）》，**许可禁止再分发，模型不进 git**——放在 `C:\IRIS Agent\assets\live2d\大肥鱼\DeepSeek`，由 Go 侧注册的 `live2d://` 自定义协议直接喂给 WebView2（Windows 上是 `http://live2d.localhost/…`），找不到时退回 daemon 的 `/live2d`。窗口、穿透、拖窗、daemon 拉起都在 Go 里；页面还是那套 Pixi 8 + Live2D。壳里的 daemon 给她接了 `webTools()` + `screenTools()`（ADR-0042）以及 `fileTools()` / `writeTools()` / `shellTools()`——后三套的授权模型是「问她要不要放开」，壳里没有终端，所以那个 `approve` 回调被焊在窗口上：她要碰没放开的文件夹就弹一张卡片（就这次 / 以后都放开 / 不给），点了才继续，**120 秒没人答就当不给**（ADR-0045）。工具在跑时字幕上方有一颗胶囊说它在干什么（`在看你的屏幕 · 13 秒`），有卡片在等答复时改说「在等你点头」。她此刻的心情由页面每 2 秒报给 daemon（`/mood`），daemon 把 (愉悦, 兴奋, 脸, 挂了多久) 翻成一句人话，内核每轮贴在对方那句话末尾（ADR-0044）。输入条右边那颗「图」能发图：点它选、`Ctrl+V` 粘贴、或者从资源管理器直接拖进来，三种手势都落到 `POST /image` → `~/.iris/inbox/<时间戳>.png` → `sayAbout()` 转述再交给她（ADR-0046）。
 
 ```bash
 cd pi-mono/apps/desktop
@@ -80,7 +80,7 @@ npm run generate     # 改了 Shell 的 Go 方法后重新生成 src/mygo.ts
 
 上下文满了压成记忆（ADR-0023）：pi 的 `Agent` 自己不剪消息，撞窗口就是整轮 `stopReason: "error"`。现在 `context.ts` 的 `ContextCompactor` 挂在 `transformContext` 上，超预算（窗口 − 16 384）就把最旧的一段交模型写成「你自己的记述」（第一人称、200 字内、保留名字数字约定），落两处：transcript 里一条普通 assistant 便签「（更早的聊天我记着了：…）」，加 `archive.remember({ tags: ["巩固"] })` 进记忆。**压出来的是记忆，不是技术摘要**——下次开场它就在「## 你记得的事」里。摘要失败用原文兜底（`plainSummary`），不抛错；运行中不刷 system prompt（会废掉 prefix cache）。`createSession({ compact: false })` 可关，`session.compactions` 报压过几次、压前压后 token。实测 68 条旧对话压掉 52 条、1395 → 321 token，那一轮首字从 1.5 s 涨到 3.5 s。
 
-眼睛（ADR-0020）：主对话模型看不了图，所以视觉走另一条路——`vision.ts` 的 `describeImage()` 用 `workbuddy-ai/hy4free`（网关里 14 个模型实测唯一能看图的；`any/*` 404、`workbuddy-ai/gpt-6-*` 与 `glm-5.3` 429、`deepseek/*` 收下图但 **content 为空**）把图转述成几句话，`IrisSession.sayAbout()` 再把转述包成一条用户消息喂回主会话——**原图不进上下文**（主模型看不了，塞进去只烧 token）。入口：REPL 的 `/img <路径> [| 附带一句话]`、`npm run look -- <图>`。看一张 51 KB 截图约 8.8 s，1.6 MB 的 13.3 s，一轮总共 10–15 s，所以只能挂 async 车道。**小字/数字不可信**：它会读错转发数、点赞数，要准就另做裁剪或 OCR。转述的问法必须朴素（「三句以内」这类收口要求），一写清单式要求它就在 reasoning 里逐字统计、永远收不了尾。
+眼睛（ADR-0020）：主对话模型看不了图，所以视觉走另一条路——`vision.ts` 的 `describeImage()` 用 `workbuddy-ai/hy4free`（网关里 14 个模型实测唯一能看图的；`any/*` 404、`workbuddy-ai/gpt-6-*` 与 `glm-5.3` 429、`deepseek/*` 收下图但 **content 为空**）把图转述成几句话，`IrisSession.sayAbout()` 再把转述包成一条用户消息喂回主会话——**原图不进上下文**（主模型看不了，塞进去只烧 token）。入口：REPL 的 `/img <路径> [| 附带一句话]`、`npm run look -- <图>`、壳里选图/粘贴/拖入（`/image`，ADR-0046）。**`read` 撞上图也走这条**：`isImagePath()` 认 png/jpg/webp/gif，交给 `describeImage()` 转述再当文件内容返回——所以她拿到的是几句话，不是图本身，prompt 里明写「别把转述里没有的东西说成你看见的」。看一张 51 KB 截图约 8.8 s，1.6 MB 的 13.3 s，一轮总共 10–15 s，所以只能挂 async 车道。**小字/数字不可信**：它会读错转发数、点赞数，要准就另做裁剪或 OCR。转述的问法必须朴素（「三句以内」这类收口要求），一写清单式要求它就在 reasoning 里逐字统计、永远收不了尾。
 
 联网（ADR-0024）：pi 上游没有 websearch，所以借 `@liustack/modsearch` 当搜索桥——`web.ts` 起一次 `node dist/main.js`、把 JSON 摊平、压成短文本，导出 `web_search` / `web_fetch` 两个 pi 工具（工具名对齐 dsh，参数用纯 JSON Schema）。默认走 Firecrawl 免注册通道（每月 1 000 credits、无需 key、不用代理），失败自动换引擎；**失败不抛**，翻成 `isError` 结果让模型自己说查不到。prompt 里配了「## 你能上网」四条：先查再说、用自己话说别念结果别报网址、查不到就说查不到、一件事查一次。REPL 默认带工具（`--offline` 关），`npm run web -- "查询"` 是不打模型的体检口。实测单次搜索 1.1–1.9 s；问「今天有什么 AI 新闻」她自己搜了两次、15.8 s 后回「黄仁勋那边的事，NVIDIA 董事会立案查他和疑似外国情报人员的关系了。你信吗，反正我不太信」——内容是当天真事。注意 `source: "x"` 走 grok 退化路径要 11.6 s，描述里已注明一般不传。
 

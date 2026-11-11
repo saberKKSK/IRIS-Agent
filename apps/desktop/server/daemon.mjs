@@ -1,5 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { homedir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,6 +31,14 @@ const here = fileURLToPath(new URL(".", import.meta.url));
 const CORE = resolve(here, "../../../packages/iris-core");
 const PORT = Number(process.env.IRIS_DESKTOP_PORT ?? 5274);
 const MODEL_DIR = process.env.IRIS_LIVE2D_DIR ?? "C:/IRIS Agent/assets/live2d/大肥鱼/DeepSeek";
+
+// —— 他发来的图（ADR-0020 的用法之一）。
+// 他拍一张、拖一张、粘贴一张，页面把字节发到这里；落盘进 ~/.iris/inbox/，
+// 再交给 sayAbout：先过眼睛转述，再把人话当他说的话交给她。她从来看不到图本身，
+// 看到的是眼睛写下的那几行——跟她看屏幕时是同一条路。
+const INBOX = join(homedir(), ".iris", "inbox");
+const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 
 const MIME = {
 	".json": "application/json; charset=utf-8",
@@ -233,6 +242,26 @@ const session = createSession({
 	mood: moodLine,
 });
 
+/** 页面发来的图：data URL 或纯 base64 都认。写盘用时间戳命名，不覆盖旧图。 */
+function saveIncomingImage(body) {
+	const raw = typeof body.data === "string" ? body.data : "";
+	const prefix = /^data:image\/[a-z0-9.+-]+;base64,/iu.exec(raw);
+	const base64 = prefix === null ? raw : raw.slice(prefix[0].length);
+	if (base64.trim().length === 0) return { ok: false, reason: "没带图" };
+	const bytes = Buffer.from(base64, "base64");
+	if (bytes.length === 0) return { ok: false, reason: "图是空的" };
+	if (bytes.length > MAX_UPLOAD_BYTES) {
+		return { ok: false, reason: "图太大（" + Math.round(bytes.length / 1024) + " KB，上限 5 MB）" };
+	}
+	const asked = typeof body.name === "string" ? extname(body.name).toLowerCase() : "";
+	const ext = IMAGE_EXT.has(asked) ? asked : ".png";
+	const stamp = new Date().toISOString().replace(/[:.]/gu, "-");
+	mkdirSync(INBOX, { recursive: true });
+	const full = join(INBOX, stamp + ext);
+	writeFileSync(full, bytes);
+	return { ok: true, path: full, bytes: bytes.length };
+}
+
 function mapper(event) {
 	switch (event.type) {
 		case "delta":
@@ -270,7 +299,7 @@ function mapper(event) {
 
 let busy = false;
 
-async function runTurn(kind, text) {
+async function runTurn(kind, text, imagePath = null) {
 	if (busy) {
 		broadcast({ type: "error", message: "上一句还没说完" });
 		return;
@@ -278,7 +307,15 @@ async function runTurn(kind, text) {
 	busy = true;
 	const started = Date.now();
 	try {
-		if (kind === "speakup") await session.speakUp(text, { onEvent: mapper });
+		if (kind === "image" && imagePath !== null) {
+			// 转述要 8–13 秒，先说一句「在看那张图」，别让窗口干等着。
+			broadcast({ type: "tool", toolName: "look_at_image", phase: "start" });
+			try {
+				await session.sayAbout(imagePath, text, { onEvent: mapper });
+			} finally {
+				broadcast({ type: "tool", toolName: "look_at_image", phase: "end" });
+			}
+		} else if (kind === "speakup") await session.speakUp(text, { onEvent: mapper });
 		else await session.say(text, { onEvent: mapper });
 	} catch (error) {
 		broadcast({ type: "error", message: error instanceof Error ? error.message : String(error) });
@@ -397,6 +434,23 @@ const server = createServer((req, res) => {
 			res.statusCode = 202;
 			res.end("queued");
 			void runTurn("say", text);
+		});
+		return;
+	}
+
+	if (path === "/image" && req.method === "POST") {
+		void readBody(req).then((body) => {
+			const saved = saveIncomingImage(body);
+			if (saved.ok === false) {
+				res.statusCode = 400;
+				res.end(saved.reason);
+				return;
+			}
+			const text = typeof body.text === "string" ? body.text.trim() : "";
+			res.statusCode = 202;
+			res.end("queued");
+			console.log("[daemon] image " + saved.path + " " + String(saved.bytes) + "B");
+			void runTurn("image", text, saved.path);
 		});
 		return;
 	}

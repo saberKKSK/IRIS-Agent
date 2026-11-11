@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSyn
 import { homedir } from "node:os";
 import { dirname, extname, join, resolve, sep } from "node:path";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
+import { type DescribeOptions, describeImage, isImagePath, loadImage } from "./vision.ts";
 
 export type FileAction = "list" | "read" | "search";
 
@@ -698,6 +699,11 @@ export interface FileToolOptions extends FileGuardOptions {
 	maxFiles?: number;
 	/** 直接用现成的守门人（REPL 要共享授权状态时用）。 */
 	guard?: FileGuard;
+	/**
+	 * 看图的问法（read 撞上图片时交给 vision）。不传就是 vision 的默认那句
+	 * 「说说这张图里有什么，三句以内」。
+	 */
+	image?: DescribeOptions;
 }
 
 /** 路径里出现了口语文件夹名，就把它翻成真路径一起给出。 */
@@ -766,7 +772,7 @@ export function fileTools(options: FileToolOptions = {}): AgentTool[] {
 		name: "read",
 		label: "看一个文件",
 		description:
-			"读一个文本文件。默认从头读 200 行，可以指定从第几行开始、读多少行。只能读他同意过的文件夹里的文件。",
+			"读一个文件。文本文件默认从头读 200 行，可以指定从第几行开始、读多少行。png / jpg / webp / gif 这些图也能读——会交给眼睛转述成几句话，回来是字，不是图。只能读他同意过的文件夹里的文件。",
 		parameters: {
 			type: "object",
 			properties: {
@@ -785,6 +791,21 @@ export function fileTools(options: FileToolOptions = {}): AgentTool[] {
 			}
 			const verdict = await guard.check("read", asked);
 			if (!verdict.ok) return failed(asFileError(verdict), "read", asked);
+			// 图片走眼睛（ADR-0020）：说话的那个人看不了图，读成 base64 塞进对话是乱码。
+			// 所以 read 撞上图就交给 vision，回来的照旧是几行字——她说话的方式不用改。
+			if (isImagePath(verdict.path)) {
+				try {
+					const note = await describeImage(loadImage(verdict.path), options.image ?? {});
+					guard.noteSeen(verdict.path);
+					return {
+						content: [{ type: "text", text: verdict.path + "（这是一张图，我看了一眼：" + note.text + "）" }],
+						details: { ok: true, action: "read", path: verdict.path },
+					};
+				} catch (error) {
+					const why = error instanceof Error ? error.message : String(error);
+					return failed({ ok: false, kind: "binary", message: "这张图没看成：" + why }, "read", verdict.path);
+				}
+			}
 			const text = readText(verdict.path, { maxBytes: options.maxReadBytes ?? 200_000 });
 			if (text.ok === false) {
 				return failed(

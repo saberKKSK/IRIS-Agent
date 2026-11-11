@@ -63,6 +63,11 @@ export class Bridge {
 		return this.post("/say", { text });
 	}
 
+	/** 一张图（data URL）+ 他顺口说的那句话。daemon 那边先过眼睛，再交给她接话。 */
+	async image(image: { data: string; name: string; text: string }): Promise<{ ok: boolean; reason?: string }> {
+		return this.post("/image", image);
+	}
+
 	async speakUp(hint = ""): Promise<{ ok: boolean; reason?: string }> {
 		return this.post("/speakup", { hint });
 	}

@@ -231,6 +231,22 @@ html.browser body {
 	border-color: rgba(255, 106, 193, 0.55);
 }
 
+#pick {
+	background: rgba(255, 255, 255, 0.07);
+	border: 1px solid rgba(255, 255, 255, 0.16);
+	color: var(--ink);
+	border-radius: 999px;
+	padding: 0 13px;
+	font: inherit;
+	font-size: 13px;
+	cursor: pointer;
+	--app-region: no-drag;
+}
+
+#pick:hover {
+	background: rgba(255, 255, 255, 0.14);
+}
+
 #send {
 	background: rgba(255, 106, 193, 0.16);
 	border: 1px solid rgba(255, 106, 193, 0.42);

@@ -213,7 +213,7 @@ export function buildSystemPrompt(context: PromptContext): string {
 	if (context.canLook === true) {
 		lines.push("## 你能看文件");
 		lines.push(
-			"- 你能列文件夹、读文本文件、搜文件里写过什么，但只在他放开给你的文件夹里。他还没放开的，你开口跟他要一次（用 request_access 说清哪个文件夹、为什么想看），他点头以后就一直能看，不用每次重来。",
+			"- 你能列文件夹、读文本文件、搜文件里写过什么，也能看图（png / jpg / webp / gif）：图进来你拿到的是几行转述，不是你亲眼看见的那张图——所以别把转述里没有的东西说成你看见的。但只在他放开给你的文件夹里。他还没放开的，你开口跟他要一次（用 request_access 说清哪个文件夹、为什么想看），他点头以后就一直能看，不用每次重来。",
 		);
 		lines.push("- 被挡下来别再重复同一个动作——要么换个说法跟他要，要么直说你看不到。");
 		const roots = context.lookRoots ?? [];

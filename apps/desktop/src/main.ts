@@ -17,6 +17,7 @@ let streaming = false;
 /** 工具名 -> 人话。她看屏幕时要 40 秒，页面上得有一句「在看你的屏幕」而不是干等着。 */
 const TOOL_LABELS: Readonly<Record<string, string>> = {
 	look_at_screen: "在看你的屏幕",
+	look_at_image: "在看那张图",
 	web_search: "在上网查",
 	web_fetch: "在翻网页",
 	ls: "在看文件夹",
@@ -56,6 +57,14 @@ const ui = mountUi({
 		if (bridge === null) return;
 		void bridge.say(text).then((result) => {
 			if (!result.ok) ui.setError("发不出去：" + (result.reason ?? "daemon 没在跑？"));
+		});
+	},
+	onImage(image): void {
+		if (bridge === null) return;
+		// 图不会直接进对话（她说话的那个模型看不了图）：daemon 先让眼睛转述，再当他说的话交给她。
+		ui.setStatus("图递过去了，她在看…");
+		void bridge.image(image).then((result) => {
+			if (!result.ok) ui.setError("图没递过去：" + (result.reason ?? "daemon 没在跑？"));
 		});
 	},
 	onAnswer(id: string, choice: "yes" | "always" | "no"): void {

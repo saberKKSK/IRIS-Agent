@@ -25,8 +25,19 @@ export interface ChatUi {
 	hideAsk(): void;
 }
 
+/** 要发给她的一张图：页面只负责把字节读出来，怎么送是别人的事。 */
+export interface IncomingImage {
+	/** data URL（data:image/png;base64,…）。 */
+	data: string;
+	name: string;
+	/** 他顺手打的那句话，可能为空。 */
+	text: string;
+}
+
 export interface UiOptions {
 	onSay(text: string): void;
+	/** 他选了 / 粘贴了 / 拖进来一张图。 */
+	onImage?(image: IncomingImage): void;
 	/** 字幕条出现/消失/变高时叫一声：窗口要跟着改「哪儿吃鼠标」。 */
 	onLayout?(): void;
 	onQuit?(): void;
@@ -40,6 +51,8 @@ export function mountUi(options: UiOptions): ChatUi {
 	const said = document.querySelector<HTMLDivElement>("#said");
 	const input = document.querySelector<HTMLInputElement>("#input");
 	const send = document.querySelector<HTMLButtonElement>("#send");
+	const pick = document.querySelector<HTMLButtonElement>("#pick");
+	const file = document.querySelector<HTMLInputElement>("#file");
 	const quit = document.querySelector<HTMLButtonElement>("#quit");
 	const status = document.querySelector<HTMLDivElement>("#status");
 	// 名字别叫 busy：下面那个 busy 是「这一轮还没说完」，两回事。
@@ -56,6 +69,8 @@ export function mountUi(options: UiOptions): ChatUi {
 		said === null ||
 		input === null ||
 		send === null ||
+		pick === null ||
+		file === null ||
 		status === null ||
 		busyBar === null ||
 		busyText === null ||
@@ -107,7 +122,57 @@ export function mountUi(options: UiOptions): ChatUi {
 		options.onSay(text);
 	};
 
+	/**
+	 * 发图：她看不了图（说话的那个模型是纯文本），图得先过眼睛——那一步在 daemon 里做。
+	 * 页面只管把字节读成 data URL 递过去；顺手打的那句话一起带上，当图的注解。
+	 */
+	const sendImage = (chosen: File): void => {
+		if (busy || options.onImage === undefined) return;
+		if (!chosen.type.startsWith("image/")) {
+			status.textContent = "这个不是图";
+			return;
+		}
+		const reader = new FileReader();
+		reader.onload = () => {
+			const data = typeof reader.result === "string" ? reader.result : "";
+			if (data.length === 0) return;
+			const text = input.value.trim();
+			input.value = "";
+			buffer = text.length > 0 ? "［图］" + text : "［图］";
+			said.classList.remove("thinking");
+			caption.hidden = false;
+			topic.textContent = "你";
+			paint();
+			options.onImage?.({ data, name: chosen.name, text });
+		};
+		reader.readAsDataURL(chosen);
+	};
+
 	send.addEventListener("click", submit);
+	pick.addEventListener("click", () => file.click());
+	file.addEventListener("change", () => {
+		const chosen = file.files?.[0];
+		file.value = "";
+		if (chosen !== undefined) sendImage(chosen);
+	});
+	// 截完图 Ctrl+V 是最顺的一条路；从资源管理器直接拖进窗口也算。
+	window.addEventListener("paste", (event: ClipboardEvent) => {
+		for (const item of Array.from(event.clipboardData?.items ?? [])) {
+			if (!item.type.startsWith("image/")) continue;
+			const chosen = item.getAsFile();
+			if (chosen === null) continue;
+			event.preventDefault();
+			sendImage(chosen);
+			return;
+		}
+	});
+	window.addEventListener("dragover", (event: DragEvent) => event.preventDefault());
+	window.addEventListener("drop", (event: DragEvent) => {
+		const chosen = event.dataTransfer?.files?.[0];
+		if (chosen === undefined) return;
+		event.preventDefault();
+		sendImage(chosen);
+	});
 	input.addEventListener("keydown", (event: KeyboardEvent) => {
 		if (event.key === "Enter" && !event.isComposing) {
 			event.preventDefault();

@@ -89,6 +89,11 @@ export function mimeOf(path: string): string {
 	return MIME_BY_EXT[extname(path).toLowerCase()] ?? "image/png";
 }
 
+/** 这个路径是不是一张看得懂的图。read 拿它决定走文本还是走眼睛。 */
+export function isImagePath(path: string): boolean {
+	return MIME_BY_EXT[extname(path).toLowerCase()] !== undefined;
+}
+
 /** 读图成 base64。空文件与超限直接抛，不静默降级。 */
 export function loadImage(path: string): VisionImage {
 	const size = statSync(path).size;
