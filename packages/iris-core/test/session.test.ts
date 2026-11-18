@@ -735,3 +735,34 @@ test("没接心情：prompt 里还是写死的那个数，也不附注", async (
 	await session.say("在干嘛");
 	assert.doesNotMatch(textOf(seen[0]?.at(-1) as AgentMessage), /你现在的心情/u);
 });
+
+test("每轮回忆（ADR-0048）：开了就把这句话勾起来的旧事贴在末尾，不进历史；不开就不贴", async () => {
+	const archive = new SqliteArchive({ path: ":memory:" });
+	archive.remember({ text: "去年冬天一起去青岛看海", importance: 0.8 });
+	const seen: AgentMessage[][] = [];
+	const session = createSession({
+		persona: PERSONA,
+		streamFn: scripted(["记得", "嗯"], (messages) => seen.push([...messages])),
+		archive,
+		memoryLimit: 0,
+		recallPerTurn: 3,
+	});
+	await session.say("还想再去看海");
+	assert.match(textOf(seen[0]?.at(-1) as AgentMessage), /想起的旧事[\s\S]*青岛看海/u);
+	await session.say("今天吃了面");
+	assert.doesNotMatch(textOf(seen[1]?.at(-1) as AgentMessage), /想起的旧事/u, "只撞上一个「天」字不算想起来");
+	const earlier = seen[1]?.find((message) => message.role === "user");
+	assert.doesNotMatch(textOf(earlier as AgentMessage), /想起的旧事/u, "上一轮贴的不该留在历史里");
+
+	const plain: AgentMessage[][] = [];
+	const off = createSession({
+		persona: PERSONA,
+		streamFn: scripted(["嗯"], (messages) => plain.push([...messages])),
+		archive,
+		memoryLimit: 0,
+		reuseConversation: false,
+		resumeMessages: 0,
+	});
+	await off.say("还想再去看海");
+	assert.doesNotMatch(textOf(plain[0]?.at(-1) as AgentMessage), /想起的旧事/u);
+});

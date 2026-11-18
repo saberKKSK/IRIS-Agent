@@ -1,0 +1,690 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#efe7e3" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#120e13" media="(prefers-color-scheme: dark)">
+<title>IRIS</title>
+<style>
+	:root {
+		color-scheme: light dark;
+		--bg: #efe7e3; --panel: #fbf8f6; --surface: #fff; --ink: #2b2226; --muted: #6f6166; --line: #2b22261f;
+		--accent: #a3455d; --accent-soft: #b4536b1a; --danger: #b3261e;
+		/* 实心填充（我的气泡、主按钮）两种配色下都用这一对，上面压白字。 */
+		--fill: #b4536b; --fill-deep: #96405a;
+		--shadow: 0 1px 2px #2b22260f, 0 10px 30px #2b222614;
+		--serif: "Songti SC", "Noto Serif SC", "Source Han Serif SC", STSong, SimSun, serif;
+		--sans: system-ui, -apple-system, "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", sans-serif;
+	}
+	@media (prefers-color-scheme: dark) {
+		:root {
+			--bg: #120e13; --panel: #1b161d; --surface: #272029; --ink: #f0e7ea; --muted: #a8999f; --line: #ffffff1a;
+			--accent: #e08aa0; --accent-soft: #e08aa024; --danger: #f2b8b5;
+			--shadow: 0 1px 2px #0006, 0 10px 30px #0008;
+		}
+	}
+	* { box-sizing: border-box; }
+	[hidden] { display: none !important; }
+	html, body { height: 100%; margin: 0; }
+	body {
+		font: 16px/1.6 var(--sans); color: var(--ink);
+		background: radial-gradient(90% 70% at 85% 0%, var(--accent-soft), transparent 60%), var(--bg);
+		display: flex; align-items: center; justify-content: center;
+	}
+	button, input, textarea { font: inherit; color: inherit; }
+	button { cursor: pointer; border: 0; background: none; padding: 0; }
+	button:disabled { opacity: .5; cursor: default; }
+	:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+	h1, h2 { margin: 0; font-family: var(--serif); font-weight: 600; letter-spacing: .02em; }
+
+	/* —— 通用控件 —— */
+	.field { display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: var(--muted); }
+	.field input, .field textarea {
+		padding: 11px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink);
+		font-size: 16px; transition: border-color .15s, box-shadow .15s;
+	}
+	.field input:focus, .field textarea:focus { outline: 0; border-color: var(--fill); box-shadow: 0 0 0 3px var(--accent-soft); }
+	.field textarea { resize: vertical; line-height: 1.6; }
+	.btn { min-height: 44px; padding: 0 18px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); }
+	.btn.primary { background: linear-gradient(135deg, var(--fill), var(--fill-deep)); border-color: transparent; color: #fff; font-weight: 600; }
+	.btn.quiet { border-color: transparent; background: none; color: var(--accent); }
+	.btn.danger { border-color: transparent; background: none; color: var(--danger); }
+	.icon { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; font-size: 20px; color: var(--muted); }
+	.icon:hover { background: var(--accent-soft); color: var(--accent); }
+	.pair { display: flex; gap: 10px; }
+	.pair > :first-child { flex: 1; min-width: 0; }
+	.note { font-size: 13px; color: var(--muted); margin: 0; }
+	.seg { border: 0; padding: 0; margin: 0; display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); }
+	.seg legend { float: left; padding: 0; margin-right: 4px; }
+	.seg input { position: absolute; opacity: 0; }
+	.seg span { display: block; min-width: 44px; padding: 8px 0; text-align: center; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; }
+	.seg input:checked + span { background: var(--fill); border-color: var(--fill); color: #fff; }
+	.seg input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+	.check { display: flex; align-items: center; gap: 10px; font-size: 15px; }
+	.check input { width: 18px; height: 18px; accent-color: var(--fill); }
+
+	.avatar {
+		--size: 48px; width: var(--size); height: var(--size); flex: none; border-radius: 50%; overflow: hidden;
+		display: grid; place-items: center; color: #fff; font: 600 calc(var(--size) * .42)/1 var(--serif);
+		background: hsl(var(--hue, 340) 30% 42%); box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--line);
+	}
+	.avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+	#toast {
+		position: fixed; top: max(16px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); z-index: 10;
+		max-width: min(90vw, 420px); padding: 10px 16px; border-radius: 12px; font-size: 14px;
+		background: var(--ink); color: var(--panel); box-shadow: var(--shadow);
+	}
+	#toast:empty { display: none; }
+
+	/* —— 登录 —— */
+	#login {
+		width: min(92vw, 380px); padding: 36px 28px; border-radius: 24px; background: var(--panel); box-shadow: var(--shadow);
+		display: flex; flex-direction: column; gap: 16px;
+	}
+	#login h1 { font-size: 34px; letter-spacing: .12em; color: var(--accent); }
+	#login .lead { margin: -8px 0 8px; color: var(--muted); }
+
+	/* —— 主界面：左边联系人，右边聊天 —— */
+	#app {
+		width: min(100vw - 48px, 1180px); height: min(100dvh - 48px, 880px);
+		display: grid; grid-template-columns: 340px minmax(0, 1fr);
+		border-radius: 24px; overflow: hidden; background: var(--panel); box-shadow: var(--shadow);
+	}
+	#side { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); }
+	.bar { flex: none; height: 64px; padding: 0 12px 0 20px; display: flex; align-items: center; gap: 4px; border-bottom: 1px solid var(--line); }
+	.bar h1, .bar h2 { flex: 1; min-width: 0; font-size: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	#contacts { flex: 1; overflow-y: auto; list-style: none; margin: 0; padding: 8px; }
+	.row { width: 100%; display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 16px; text-align: left; }
+	.row:hover { background: var(--accent-soft); }
+	.row[aria-current="true"] { background: var(--accent-soft); }
+	.row .meta { flex: 1; min-width: 0; }
+	.row .name { display: flex; align-items: baseline; gap: 8px; }
+	.row .name b { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	.row .name time { flex: none; font-size: 12px; color: var(--muted); }
+	.row .preview { font-size: 14px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	#empty { margin: auto; padding: 24px; text-align: center; color: var(--muted); display: flex; flex-direction: column; gap: 14px; align-items: center; }
+
+	#pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
+	#pane > section { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+	#pane .bar { padding-left: 16px; gap: 10px; background: var(--panel); }
+	#blank { align-items: center; justify-content: center; color: var(--muted); gap: 6px; }
+	#blank h2 { font-size: 30px; letter-spacing: .12em; color: var(--accent); }
+	.back { display: none; }
+	.form { flex: 1; overflow-y: auto; padding: 24px; }
+	.form > div { max-width: 560px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+	.form hr { width: 100%; border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+	#pickAvatar { align-self: center; position: relative; border-radius: 50%; }
+	#pickAvatar::after {
+		content: "换头像"; position: absolute; inset: auto 0 0 0; padding: 4px 0; font-size: 12px; color: #fff;
+		background: #0009; border-radius: 0 0 48px 48px; clip-path: inset(0 round 0 0 48px 48px);
+	}
+
+	/* —— 聊天 —— */
+	#log {
+		flex: 1; overflow-y: auto; padding: 16px 16px 8px; display: flex; flex-direction: column; gap: 12px;
+		background: radial-gradient(120% 50% at 100% 0%, var(--accent-soft), transparent 70%);
+	}
+	#more { align-self: center; min-height: 32px; padding: 0 14px; font-size: 13px; }
+	.stamp { align-self: center; font-size: 12px; color: var(--muted); padding: 2px 10px; }
+	.group { display: flex; gap: 10px; align-items: flex-start; max-width: min(86%, 620px); }
+	.group.user { align-self: flex-end; }
+	.stack { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; min-width: 0; }
+	.group.user .stack { align-items: flex-end; }
+	.bubble {
+		padding: 9px 14px; border-radius: 18px; white-space: pre-wrap; overflow-wrap: anywhere;
+		background: var(--surface); box-shadow: 0 1px 2px #2b222614;
+	}
+	.group.assistant .bubble:first-child { border-top-left-radius: 6px; }
+	.group.user .bubble { background: linear-gradient(135deg, var(--fill), var(--fill-deep)); color: #fff; border-top-right-radius: 6px; }
+	/* 括号里的动作和神情：不是台词，压低一档。 */
+	.act { font-style: italic; color: var(--muted); }
+	.group.user .act { color: inherit; opacity: .85; }
+	.fresh .bubble { animation: pop .18s ease-out both; }
+	@keyframes pop { from { opacity: 0; transform: translateY(6px) scale(.98); } }
+	.typing { display: flex; gap: 5px; padding: 14px; }
+	.typing i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); animation: blink 1.2s infinite both; }
+	.typing i:nth-child(2) { animation-delay: .2s; }
+	.typing i:nth-child(3) { animation-delay: .4s; }
+	@keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+	#send { flex: none; display: flex; align-items: flex-end; gap: 10px; padding: 10px 16px; background: var(--panel); border-top: 1px solid var(--line); }
+	#text {
+		flex: 1; min-width: 0; height: 44px; max-height: 140px; resize: none; padding: 10px 16px; line-height: 1.5;
+		border: 1px solid var(--line); border-radius: 22px; background: var(--surface);
+	}
+	#text:focus { outline: 0; border-color: var(--fill); box-shadow: 0 0 0 3px var(--accent-soft); }
+	#sendButton { width: 44px; height: 44px; flex: none; border-radius: 50%; color: #fff; font-size: 18px; background: linear-gradient(135deg, var(--fill), var(--fill-deep)); }
+	#chat > .note { flex: none; text-align: center; padding: 0 16px max(8px, env(safe-area-inset-bottom)); background: var(--panel); }
+
+	/* —— 窄屏：列表和聊天是前后两页 —— */
+	@media (max-width: 900px) {
+		#app { width: 100vw; height: 100dvh; border-radius: 0; grid-template-columns: 300px minmax(0, 1fr); }
+	}
+	@media (max-width: 680px) {
+		#app { grid-template-columns: minmax(0, 1fr); }
+		#pane, body.pane-open #side { display: none; }
+		body.pane-open #pane { display: flex; }
+		.back { display: grid; }
+		.bar { padding-top: env(safe-area-inset-top); height: calc(64px + env(safe-area-inset-top)); }
+		#pane .bar { padding-left: 6px; }
+		.group { max-width: 92%; }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		* { animation: none !important; transition: none !important; }
+	}
+</style>
+</head>
+<body>
+<div id="toast" role="alert"></div>
+
+<section id="login" hidden>
+	<h1>IRIS</h1>
+	<p class="lead">换个地方，接着聊。</p>
+	<label class="field">手机号
+		<div class="pair">
+			<input id="phone" type="tel" inputmode="numeric" autocomplete="tel" maxlength="11">
+			<button id="sendCode" class="btn" type="button">发验证码</button>
+		</div>
+	</label>
+	<label class="field">验证码
+		<input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6">
+	</label>
+	<button id="doLogin" class="btn primary" type="button">登录</button>
+	<p class="note">没注册过的手机号会自动注册。</p>
+</section>
+
+<div id="app" hidden>
+	<aside id="side">
+		<div class="bar">
+			<h1>消息</h1>
+			<button id="newContact" class="icon" type="button" aria-label="新建联系人" title="新建联系人">＋</button>
+			<button id="openAccount" class="icon" type="button" aria-label="我的账号" title="我的账号">⚙</button>
+		</div>
+		<ul id="contacts"></ul>
+		<div id="empty" hidden>
+			<span>还没有联系人。<br>写一张人设卡，把 TA 加进来。</span>
+			<button id="firstContact" class="btn primary" type="button">新建联系人</button>
+		</div>
+	</aside>
+
+	<main id="pane">
+		<section id="blank">
+			<h2>IRIS</h2>
+			<span>从左边选一个人，接着聊</span>
+		</section>
+
+		<section id="chat" hidden>
+			<div class="bar">
+				<button class="icon back" type="button" aria-label="返回">‹</button>
+				<span id="chatAvatar"></span>
+				<h2 id="title"></h2>
+				<button id="editContact" class="icon" type="button" aria-label="人设卡" title="人设卡">✎</button>
+			</div>
+			<div id="log" role="log" aria-live="polite">
+				<button id="more" class="btn quiet" type="button" hidden>更早的</button>
+			</div>
+			<form id="send">
+				<textarea id="text" aria-label="说点什么" maxlength="4000" placeholder="说点什么" rows="1"></textarea>
+				<button id="sendButton" type="submit" aria-label="发送">➤</button>
+			</form>
+			<p class="note">对面是 AI，回复由模型生成。</p>
+		</section>
+
+		<section id="editor" hidden>
+			<div class="bar">
+				<button class="icon back" type="button" aria-label="返回">‹</button>
+				<h2 id="editorTitle"></h2>
+			</div>
+			<div class="form"><div>
+				<button id="pickAvatar" type="button" aria-label="换头像"></button>
+				<input id="avatarFile" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+				<label class="field">名字 <input id="cardName" maxlength="20"></label>
+				<fieldset class="seg"><legend>TA 是</legend>
+					<label><input type="radio" name="pronouns" value="他" checked><span>他</span></label>
+					<label><input type="radio" name="pronouns" value="她"><span>她</span></label>
+					<label><input type="radio" name="pronouns" value="它"><span>它</span></label>
+				</fieldset>
+				<fieldset class="seg"><legend>你是</legend>
+					<label><input type="radio" name="userPronoun" value="她" checked><span>她</span></label>
+					<label><input type="radio" name="userPronoun" value="他"><span>他</span></label>
+				</fieldset>
+				<label class="field">人设正文
+					<textarea id="cardDoc" rows="12" maxlength="8000" placeholder="性格、说话方式、你们的关系、怎么称呼你、不能做的事"></textarea>
+				</label>
+				<label class="check"><input id="cardStage" type="checkbox" checked> 允许用括号写动作和神情</label>
+				<button id="saveCard" class="btn primary" type="button">保存</button>
+				<button id="removeContact" class="btn danger" type="button">删除这个联系人</button>
+			</div></div>
+		</section>
+
+		<section id="account" hidden>
+			<div class="bar">
+				<button class="icon back" type="button" aria-label="返回">‹</button>
+				<h2>我的账号</h2>
+			</div>
+			<div class="form"><div>
+				<p id="phoneState" class="note"></p>
+				<p id="keyState"></p>
+				<label class="field">自己的 DeepSeek API key（填了就不占每日额度）
+					<div class="pair">
+						<input id="key" type="password" autocomplete="off" placeholder="sk-…">
+						<button id="saveKey" class="btn" type="button">保存</button>
+					</div>
+				</label>
+				<button id="dropKey" class="btn quiet" type="button">删掉 key</button>
+				<hr>
+				<button id="logout" class="btn danger" type="button">退出登录</button>
+			</div></div>
+		</section>
+	</main>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const ERRORS = {
+	bad_phone: "手机号不对", bad_code: "验证码不对或过期了", too_many: "发得太勤了，过一会儿再试",
+	quota: "今天的额度用完了。填上自己的 API key 可以接着聊", busy: "上一句还没说完",
+	bad_key: "这个 key 看着不对", bad_text: "这句太长了", too_large: "内容太长了",
+	bad_image: "这张图用不了，换一张 JPG 或 PNG", too_many_contacts: "联系人已经到上限了（20 个）",
+	not_found: "这个联系人不在了",
+};
+const PANES = ["blank", "chat", "editor", "account"];
+const GAP_MS = 5 * 60_000;
+/** 括号里的动作、星号包着的动作。 */
+const ACT = /（[^（）\n]*）|\([^()\n]*\)|\*[^*\n]+\*/g;
+
+let contacts = [];
+/** 正在聊的联系人。 */
+let current = null;
+/** 正在改的联系人；null 是在新建。 */
+let editing = null;
+/** 刚选好还没上传的头像（data URL）。 */
+let pendingAvatar = null;
+let oldest = null;
+/** 聊天记录里最后一条的时间，决定要不要插一行时间。 */
+let lastAt = 0;
+let toastTimer = 0;
+
+function el(tag, className, text) {
+	const node = document.createElement(tag);
+	if (className) node.className = className;
+	if (text !== undefined) node.textContent = text;
+	return node;
+}
+
+function toast(message) {
+	$("toast").textContent = message;
+	clearTimeout(toastTimer);
+	toastTimer = setTimeout(() => { $("toast").textContent = ""; }, 4000);
+}
+
+function showLogin() {
+	$("app").hidden = true;
+	$("login").hidden = false;
+}
+
+/** 右边换一页；窄屏上它盖住联系人列表。 */
+function pane(name) {
+	for (const id of PANES) $(id).hidden = id !== name;
+	document.body.classList.toggle("pane-open", name !== "blank");
+}
+
+async function api(method, path, body) {
+	const res = await fetch(path, {
+		method,
+		headers: body === undefined ? {} : { "Content-Type": "application/json" },
+		body: body === undefined ? undefined : JSON.stringify(body),
+	});
+	if (res.status === 401 && !path.startsWith("/auth/")) { showLogin(); throw new Error("请先登录"); }
+	if (!res.ok) {
+		const fail = await res.json().catch(() => ({}));
+		throw new Error(fail.message ?? ERRORS[fail.error] ?? "出错了（" + res.status + "）");
+	}
+	return res.status === 204 ? null : res.json();
+}
+
+function guard(run) {
+	return async (event) => {
+		event?.preventDefault();
+		try { await run(event); } catch (error) {
+			// fetch 断线抛的是 TypeError，原文是英文；说到一半断线的话服务端会照常说完，刷新就看得到。
+			toast(error instanceof TypeError ? "网络断了，刷新看看" : error.message);
+		}
+	};
+}
+
+function avatar(contact, size, src) {
+	const node = el("span", "avatar");
+	node.style.setProperty("--size", size + "px");
+	const url = src ?? (contact?.avatar ? "/contacts/" + contact.id + "/avatar?v=" + contact.avatar : null);
+	if (url) {
+		const img = new Image();
+		img.alt = "";
+		img.src = url;
+		node.append(img);
+	} else {
+		const name = contact?.name ?? "";
+		let hue = 0;
+		for (const char of name) hue = (hue * 31 + char.codePointAt(0)) % 360;
+		node.style.setProperty("--hue", String(name ? hue : 340));
+		node.textContent = [...name][0] ?? "＋";
+	}
+	return node;
+}
+
+function two(value) { return String(value).padStart(2, "0"); }
+
+/** 聊天里那行时间：今天只写钟点，昨天写「昨天」，再早写日期。 */
+function clock(at, short) {
+	const date = new Date(at);
+	const days = Math.floor((new Date().setHours(0, 0, 0, 0) - new Date(at).setHours(0, 0, 0, 0)) / 86_400_000);
+	const time = two(date.getHours()) + ":" + two(date.getMinutes());
+	if (days <= 0) return time;
+	if (days === 1) return short ? "昨天" : "昨天 " + time;
+	const day = (date.getMonth() + 1) + "月" + date.getDate() + "日";
+	return short ? day : day + " " + time;
+}
+
+/** 把一段话写进气泡，括号里的动作单独压低一档。全程 textContent，不拼 HTML。 */
+function fill(node, text) {
+	let from = 0;
+	for (const match of text.matchAll(ACT)) {
+		if (match.index > from) node.append(text.slice(from, match.index));
+		node.append(el("span", "act", match[0]));
+		from = match.index + match[0].length;
+	}
+	if (from < text.length) node.append(text.slice(from));
+}
+
+/** 一个人连着说的几句是一组：对面的带头像，换行拆成连发的几条。 */
+function group(role, text) {
+	const node = el("div", "group " + role);
+	if (role === "assistant") node.append(avatar(current, 36));
+	node.append(el("div", "stack"));
+	paint(node, role, text);
+	return node;
+}
+
+function paint(node, role, text) {
+	const stack = node.querySelector(".stack");
+	stack.textContent = "";
+	const parts = role === "assistant" ? text.split(/\n+/).map((line) => line.trim()).filter(Boolean) : [text];
+	if (text === "") {
+		const dots = el("div", "bubble typing");
+		dots.setAttribute("aria-label", "正在输入");
+		dots.append(el("i"), el("i"), el("i"));
+		stack.append(dots);
+		return;
+	}
+	for (const part of parts) {
+		const bubble = el("div", "bubble");
+		fill(bubble, part);
+		stack.append(bubble);
+	}
+}
+
+/** 一页历史 → 一串节点（旧在上），隔得久的两条之间插一行时间。 */
+function page(messages, after) {
+	const nodes = [];
+	let previous = after;
+	for (const message of messages) {
+		if (message.role !== "user" && message.role !== "assistant") continue;
+		if (message.at - previous > GAP_MS) nodes.push(el("div", "stamp", clock(message.at)));
+		previous = message.at;
+		nodes.push(group(message.role, message.content));
+	}
+	return nodes;
+}
+
+async function loadHistory(before) {
+	const target = current;
+	const query = before === null ? "" : "?before=" + before;
+	const { messages } = await api("GET", "/contacts/" + target.id + "/history" + query);
+	if (current !== target) return;
+	const log = $("log");
+	if (before === null) {
+		for (const node of [...log.children]) if (node.id !== "more") node.remove();
+		log.append(...page(messages, 0));
+		lastAt = messages.at(-1)?.at ?? 0;
+		log.scrollTop = log.scrollHeight;
+	} else {
+		// 往上翻：插在「更早的」后面，再把滚动位置补回去，眼前那条不跳。
+		const height = log.scrollHeight;
+		$("more").after(...page(messages, 0));
+		log.scrollTop += log.scrollHeight - height;
+	}
+	if (messages.length > 0) oldest = messages[0].id;
+	$("more").hidden = messages.length < 50;
+}
+
+function renderContacts() {
+	const list = $("contacts");
+	list.textContent = "";
+	$("empty").hidden = contacts.length > 0;
+	list.hidden = contacts.length === 0;
+	for (const contact of contacts) {
+		const row = el("button", "row");
+		row.type = "button";
+		if (contact.id === current?.id) row.setAttribute("aria-current", "true");
+		const name = el("div", "name");
+		name.append(el("b", "", contact.name));
+		if (contact.last) name.append(el("time", "", clock(contact.last.at, true)));
+		const meta = el("div", "meta");
+		meta.append(name, el("div", "preview", contact.last ? contact.last.content : "还没聊过，打个招呼吧"));
+		row.append(avatar(contact, 48), meta);
+		row.onclick = guard(() => openChat(contact));
+		const item = el("li");
+		item.append(row);
+		list.append(item);
+	}
+}
+
+async function refreshContacts() {
+	contacts = (await api("GET", "/contacts")).contacts;
+	if (current) current = contacts.find((contact) => contact.id === current.id) ?? null;
+	renderContacts();
+}
+
+async function openChat(contact) {
+	current = contact;
+	oldest = null;
+	$("title").textContent = contact.name;
+	$("chatAvatar").replaceChildren(avatar(contact, 40));
+	renderContacts();
+	pane("chat");
+	await loadHistory(null);
+	$("text").focus();
+}
+
+function radio(name, value) {
+	if (value === undefined) return document.querySelector("input[name=" + name + "]:checked").value;
+	for (const input of document.querySelectorAll("input[name=" + name + "]")) input.checked = input.value === value;
+}
+
+function openEditor(contact) {
+	editing = contact;
+	pendingAvatar = null;
+	$("editorTitle").textContent = contact ? "人设卡" : "新建联系人";
+	$("cardName").value = contact?.name ?? "";
+	$("cardDoc").value = contact?.doc ?? "";
+	$("cardStage").checked = contact?.stageDirections ?? true;
+	radio("pronouns", contact?.pronouns ?? "他");
+	radio("userPronoun", contact?.userPronoun ?? "她");
+	$("pickAvatar").replaceChildren(avatar(contact, 96));
+	$("removeContact").hidden = contact === null;
+	pane("editor");
+}
+
+async function openAccount() {
+	const me = await api("GET", "/me");
+	$("phoneState").textContent = "登录的手机号：" + me.phone;
+	$("keyState").textContent = me.keyTail === null
+		? "没填 key：今天用了 " + me.quota.used + " / " + me.quota.limit + " 轮"
+		: "在用你自己的 key（末尾 " + me.keyTail + "）";
+	$("dropKey").hidden = me.keyTail === null;
+	pane("account");
+}
+
+async function start() {
+	try {
+		await api("GET", "/me");
+	} catch {
+		// 开发模式（服务端设了 IRIS_DEV_PHONE）：免验证码直接进；没开就留在登录页。
+		try { await api("POST", "/auth/dev"); } catch { return showLogin(); }
+	}
+	$("login").hidden = true;
+	$("app").hidden = false;
+	current = null;
+	pane("blank");
+	await refreshContacts();
+}
+
+$("sendCode").onclick = guard(async () => {
+	await api("POST", "/auth/code", { phone: $("phone").value.trim() });
+	toast("验证码发出去了");
+	$("code").focus();
+});
+$("doLogin").onclick = guard(async () => {
+	await api("POST", "/auth/login", { phone: $("phone").value.trim(), code: $("code").value.trim() });
+	await start();
+});
+$("code").onkeydown = (event) => { if (event.key === "Enter") $("doLogin").click(); };
+
+$("newContact").onclick = $("firstContact").onclick = () => openEditor(null);
+$("editContact").onclick = () => openEditor(current);
+$("openAccount").onclick = guard(openAccount);
+for (const button of document.querySelectorAll(".back")) {
+	button.onclick = () => {
+		// 从人设卡返回时回到刚才那段聊天；从聊天返回才是回列表。
+		if (!$("editor").hidden && editing && current) return pane("chat");
+		current = null;
+		renderContacts();
+		pane("blank");
+	};
+}
+
+$("pickAvatar").onclick = () => $("avatarFile").click();
+$("avatarFile").onchange = guard(async () => {
+	const file = $("avatarFile").files[0];
+	$("avatarFile").value = "";
+	if (!file) return;
+	let bitmap;
+	try { bitmap = await createImageBitmap(file); } catch { throw new Error(ERRORS.bad_image); }
+	// 居中裁成方的再缩到 256：头像本来就这么小，也好让它装得进一次普通请求。
+	const side = Math.min(bitmap.width, bitmap.height);
+	const canvas = el("canvas");
+	canvas.width = canvas.height = 256;
+	canvas.getContext("2d").drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, 256, 256);
+	pendingAvatar = canvas.toDataURL("image/jpeg", 0.85);
+	$("pickAvatar").replaceChildren(avatar(null, 96, pendingAvatar));
+});
+
+$("saveCard").onclick = guard(async () => {
+	const card = {
+		name: $("cardName").value, pronouns: radio("pronouns"), userPronoun: radio("userPronoun"),
+		doc: $("cardDoc").value, stageDirections: $("cardStage").checked,
+	};
+	let id = editing?.id;
+	if (id) await api("PUT", "/contacts/" + id, card);
+	else id = (await api("POST", "/contacts", card)).id;
+	if (pendingAvatar) await api("PUT", "/contacts/" + id + "/avatar", { data: pendingAvatar });
+	await refreshContacts();
+	await openChat(contacts.find((contact) => contact.id === id));
+});
+
+$("removeContact").onclick = guard(async () => {
+	const name = editing.name;
+	if (!confirm("删除「" + name + "」？\n你们的聊天记录和 TA 记得的事会一起删掉，找不回来。")) return;
+	await api("DELETE", "/contacts/" + editing.id);
+	current = null;
+	pane("blank");
+	await refreshContacts();
+});
+
+$("saveKey").onclick = guard(async () => {
+	await api("PUT", "/key", { key: $("key").value.trim() });
+	$("key").value = "";
+	await openAccount();
+	toast("key 存好了");
+});
+$("dropKey").onclick = guard(async () => { await api("DELETE", "/key"); await openAccount(); });
+$("logout").onclick = guard(async () => { await api("POST", "/auth/logout"); showLogin(); });
+$("more").onclick = guard(() => loadHistory(oldest));
+
+$("text").oninput = () => {
+	const box = $("text");
+	box.style.height = "auto";
+	box.style.height = Math.min(box.scrollHeight + 2, 140) + "px";
+};
+$("text").onkeydown = (event) => {
+	if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); $("send").requestSubmit(); }
+};
+
+$("send").onsubmit = guard(async () => {
+	const text = $("text").value.trim();
+	if (text === "" || $("sendButton").disabled) return;
+	const target = current;
+	const log = $("log");
+	$("sendButton").disabled = true;
+	try {
+		const res = await fetch("/contacts/" + target.id + "/say", {
+			method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }),
+		});
+		if (res.status === 401) return showLogin();
+		if (!res.ok) {
+			const fail = await res.json().catch(() => ({}));
+			throw new Error(ERRORS[fail.error] ?? "出错了（" + res.status + "）");
+		}
+		$("text").value = "";
+		$("text").oninput();
+		const now = Date.now();
+		const added = [];
+		if (now - lastAt > GAP_MS) added.push(el("div", "stamp", clock(now)));
+		const mine = group("user", text);
+		const reply = group("assistant", "");
+		mine.classList.add("fresh");
+		reply.classList.add("fresh");
+		added.push(mine, reply);
+		log.append(...added);
+		log.scrollTop = log.scrollHeight;
+		lastAt = now;
+
+		let said = "";
+		const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+		let buffer = "";
+		for (;;) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			buffer += value;
+			let cut;
+			while ((cut = buffer.indexOf("\n\n")) >= 0) {
+				const frame = buffer.slice(0, cut);
+				buffer = buffer.slice(cut + 2);
+				if (!frame.startsWith("data: ")) continue;
+				const event = JSON.parse(frame.slice(6));
+				if (event.type === "error") {
+					// 这一轮没说成，服务端也没存：刚加的都撤掉，原话放回输入框。
+					for (const node of added) node.remove();
+					$("text").value = text;
+					throw new Error(event.message);
+				}
+				// 收尾那条是清理过的全文（去了句尾句号之类），以它为准。
+				said = event.type === "turn" ? event.text : said + event.text;
+				// 中途切去跟别人聊了：那边的页面不归这一轮画，回来时从历史里读。
+				if (!reply.isConnected) continue;
+				const pinned = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+				paint(reply, "assistant", said);
+				if (pinned) log.scrollTop = log.scrollHeight;
+			}
+		}
+		await refreshContacts();
+	} finally {
+		$("sendButton").disabled = false;
+	}
+});
+
+start();
+</script>
+</body>
+</html>

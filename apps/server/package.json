@@ -1,0 +1,11 @@
+{
+	"name": "@iris/server",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "IRIS multi-user server: phone login, one session + archive per user, SSE chat (ADR-0048)",
+	"scripts": {
+		"start": "node src/main.ts",
+		"test": "node --test test/server.test.ts"
+	}
+}

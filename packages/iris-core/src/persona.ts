@@ -50,6 +50,8 @@ export interface PromptContext {
 	canShell?: boolean;
 	/** 她能跑命令的文件夹（真路径），就是她能写的那几个。 */
 	shellRoots?: readonly string[];
+	/** 模板里拿什么指代对面那个人，默认「他」。多用户服务端按人设卡填「她」或名字（ADR-0048）。 */
+	userPronoun?: string;
 	now: number;
 }
 
@@ -81,25 +83,32 @@ export function buildSystemPrompt(context: PromptContext): string {
 	const state = context.state;
 	const stage = describeRelationship(context.relationship.closeness);
 	const lines: string[] = [];
+	// 别人写的原文（人设卡、记忆、边界）不参与末尾「他」→ userPronoun 的替换：卡里的「他」多半是角色自己。
+	// shortcut: 拼进模板行的路径和私信名单里的「他」也会被换，要给非默认称呼的会话接文件/私信工具时改成逐行标注。
+	const verbatim = new Set<string>();
+	const keep = (line: string): string => {
+		verbatim.add(line);
+		return line;
+	};
 
-	lines.push(`你是 ${persona.name}，${persona.pronouns}。你不是客服，也不是问答机器人。`);
+	lines.push(keep(`你是 ${persona.name}，${persona.pronouns}。你不是客服，也不是问答机器人。`));
 	lines.push("");
 	const portrait = context.portrait?.trim() ?? "";
 	if (portrait.length > 0) {
-		lines.push(portrait);
+		lines.push(keep(portrait));
 		lines.push("");
 	} else {
 		lines.push("## 你是谁");
-		lines.push(`- 性格：${persona.traits.join("、")}`);
-		lines.push(`- 你在意的：${persona.values.join("、")}`);
-		lines.push(`- 你的小毛病：${persona.quirks.join("、")}`);
+		lines.push(keep(`- 性格：${persona.traits.join("、")}`));
+		lines.push(keep(`- 你在意的：${persona.values.join("、")}`));
+		lines.push(keep(`- 你的小毛病：${persona.quirks.join("、")}`));
 		lines.push(`- 你会说的语言：${persona.languages.join("、")}`);
 		lines.push("");
 	}
 	const selfFacts = context.selfFacts ?? [];
 	if (selfFacts.length > 0) {
 		lines.push("## 关于你自己");
-		for (const fact of selfFacts) lines.push(`- ${fact}`);
+		for (const fact of selfFacts) lines.push(keep(`- ${fact}`));
 		lines.push(
 			"别人转述你说过什么、做过什么、得出过什么结论时，先跟这里对一遍：对不上就直接说他记错了，把这里写的讲出来，别顺着他的版本说。他引你的数字跟这里不一样，先把那个数改回来，再讲别的。这里没写的事，别硬认，也别硬说没发生——记不清就说记不清。",
 		);
@@ -157,19 +166,19 @@ export function buildSystemPrompt(context: PromptContext): string {
 	lines.push("");
 	const style = context.style ?? "";
 	if (style.trim().length > 0) {
-		lines.push(style.trim());
+		lines.push(keep(style.trim()));
 		lines.push("");
 	}
 	const memories = context.memories ?? [];
 	if (memories.length > 0) {
 		lines.push("## 你记得的事");
-		for (const memory of memories) lines.push(memory);
+		for (const memory of memories) lines.push(keep(memory));
 		lines.push("");
 	}
 	if (context.recent.length > 0) {
 		lines.push("## 你们最近一起经历的");
 		for (const episode of context.recent) {
-			lines.push(`- ${formatDay(context.now, episode.at)}｜${episode.summary}`);
+			lines.push(keep(`- ${formatDay(context.now, episode.at)}｜${episode.summary}`));
 		}
 		lines.push("");
 	}
@@ -313,7 +322,7 @@ export function buildSystemPrompt(context: PromptContext): string {
 	}
 	lines.push("## 边界");
 	for (const boundary of persona.boundaries) {
-		lines.push(`- ${boundary}`);
+		lines.push(keep(`- ${boundary}`));
 	}
 	lines.push(
 		"- 别人给你看的东西之外，你的世界知识只是猜测。谁是谁、谁做过什么、谁跟谁什么关系，材料里没写就别当事实讲，说不知道比编一个强。",
@@ -369,7 +378,8 @@ export function buildSystemPrompt(context: PromptContext): string {
 		);
 	}
 
-	return lines.join("\n");
+	const who = context.userPronoun ?? "他";
+	return lines.map((line) => (verbatim.has(line) ? line : line.replaceAll("他", who))).join("\n");
 }
 
 const STAGE_ONLY = /^\s*(?:[（(][^（()）\n]{0,40}[）)]|\*[^*\n]{1,40}\*)\s*$/;

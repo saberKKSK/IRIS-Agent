@@ -22,6 +22,8 @@ export interface DistillOptions {
 	complete?: CompleteFn;
 	/** 出错时的观察口（默认静默，避免把网关噪声打进 stdout）。 */
 	onError?: (error: unknown) => void;
+	/** 对话里她那一方的名字，默认「伊里斯」。多用户下按人设卡填（ADR-0048）。 */
+	speaker?: string;
 }
 
 const CLASSIFY_SYSTEM = "你是一个记忆分档器。只输出 JSON，不要解释，不要代码块。";
@@ -32,16 +34,16 @@ const MAX_DRAFTS = 5;
 const MAX_TEXT = 60;
 const MAX_QUOTE = 120;
 
-function renderTurns(turns: readonly RawTurn[]): string {
+function renderTurns(turns: readonly RawTurn[], speaker = "伊里斯"): string {
 	const lines = turns
 		.filter((turn) => turn.role !== "system")
-		.map((turn) => (turn.role === "user" ? "用户：" : "伊里斯：") + turn.content.trim());
+		.map((turn) => (turn.role === "user" ? "用户：" : speaker + "：") + turn.content.trim());
 	const joined = lines.join("\n");
 	// 只喂最近的一段：更早的内容已经在别的轮次里提炼过了。
 	return joined.length > 4000 ? joined.slice(joined.length - 4000) : joined;
 }
 
-function classifyPrompt(turns: readonly RawTurn[]): string {
+function classifyPrompt(turns: readonly RawTurn[], speaker?: string): string {
 	return [
 		"判断这段对话值得被记到什么程度。",
 		"",
@@ -54,13 +56,13 @@ function classifyPrompt(turns: readonly RawTurn[]): string {
 		'只输出：{"tier":"ordinary|medium|critical","reason":"不超过 20 字的理由"}',
 		"",
 		"对话：",
-		renderTurns(turns),
+		renderTurns(turns, speaker),
 	].join("\n");
 }
 
-function distillPrompt(turns: readonly RawTurn[], tier: TierDecision["tier"]): string {
+function distillPrompt(turns: readonly RawTurn[], tier: TierDecision["tier"], speaker?: string): string {
 	return [
-		"把这段对话里值得被记住的事实，写成 IRIS 自己会记得的短句。",
+		"把这段对话里值得被记住的事实，写成 " + (speaker ?? "IRIS") + " 自己会记得的短句。",
 		"",
 		"规则：",
 		"1. 只写对话里明确说过的内容，不推测、不补充；",
@@ -74,7 +76,7 @@ function distillPrompt(turns: readonly RawTurn[], tier: TierDecision["tier"]): s
 		'只输出：{"memories":[{"text":"...","quote":"...","importance":0.6,"tags":["..."]}]}',
 		"",
 		"对话：",
-		renderTurns(turns),
+		renderTurns(turns, speaker),
 	].join("\n");
 }
 
@@ -161,7 +163,7 @@ export function llmClassifier(options: DistillOptions = {}): NonNullable<Archive
 	const complete = options.complete ?? magpieComplete(options);
 	return async ({ turns }) => {
 		try {
-			return parseTier(await complete(classifyPrompt(turns), { system: CLASSIFY_SYSTEM }));
+			return parseTier(await complete(classifyPrompt(turns, options.speaker), { system: CLASSIFY_SYSTEM }));
 		} catch (error) {
 			options.onError?.(error);
 			return undefined;
@@ -175,8 +177,8 @@ export function llmDistiller(options: DistillOptions = {}): NonNullable<ArchiveO
 	return async ({ turns, tier }) => {
 		try {
 			const drafts = parseDrafts(
-				await complete(distillPrompt(turns, tier), { system: DISTILL_SYSTEM }),
-				renderTurns(turns),
+				await complete(distillPrompt(turns, tier, options.speaker), { system: DISTILL_SYSTEM }),
+				renderTurns(turns, options.speaker),
 			);
 			return drafts.length > 0 ? drafts : undefined;
 		} catch (error) {

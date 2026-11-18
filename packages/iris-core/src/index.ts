@@ -1,6 +1,7 @@
 /** Public surface of the IRIS companion runtime core. */
 
 export * from "./archive.ts";
+export * from "./complete.ts";
 export * from "./context.ts";
 export * from "./distill.ts";
 export * from "./douyin.ts";

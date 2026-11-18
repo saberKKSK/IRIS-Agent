@@ -1371,3 +1371,65 @@ ADR-0020 立项时有一层硬前提：网关里能看图的只有 \`workbuddy-a
 - **她看不清的还是看不清**：小字、缩略图里的数字照样会错。prompt 里写的是「小字可能糊，看不清就说看不清」，不是「她什么都能读」。
 - **已知抖动**（2026-11-11 11:2x）：第一次问「看看我正在看什么」，她把这次调用写成了正文 \`<look_at_screen></look_at_screen>\`，一次 \`tool_start\` 都没发；同一条 daemon、同一套工具，之后两次都正常调用。判断是模型偶发把工具调用吐成文本，不是工具没接上——persona 里加了一句「工具名别写成 \`<...>\` 放进正文」，没有做重试兜底。
 
+## ADR-0048 · 多用户：每人一库一卡，Node 服务端托管上游，Web 与 Flutter 共用一套接口
+
+- 状态：内核与服务端已跑通（2026-11-18）：`npm run check` 通过，`npm test`（iris-core 249 + server 7）全过；服务端实际起过，验证了登录、建卡、真实一轮 SSE 对话与额度计数。Web 端只检查到页面脚本语法与接口层，没在浏览器里点过；Flutter 端仍未生成平台工程、未 `analyze`（本机没装 Flutter）
+- 日期：2026-11-18
+
+### 背景
+
+DeepSeek 自 2026-11-15 起对 App / 网页端的长对话限额（不活跃 72 小时或 7 天的长对话不可继续、单次输入约 4 万字、每日额度），弹窗里写着「可导出历史记录到其他 App 使用」。被挡在外面的一大批人不会开 API，开了也没有能接着聊的地方。用户要把 IRIS 做成给这批人用的产品：手机号登录就能用，记忆不丢，网页和 App 是同一段对话。
+
+到这一条为止整套东西是单用户写死的：会话 id 恒为 `"iris"`，一个 `SqliteArchive` 一个文件，`apps/desktop/server/daemon.mjs` 里 `session` / `archive` / 心情都是模块级单例。
+
+### 决定
+
+1. **隔离靠「各开各的库文件」，不改表结构。** 每个用户 `<数据目录>/users/<随机 id>/{iris.db, card.json}`。内核里写死的会话 id `"iris"` 不用动——别人的库根本没打开。目录名是随机 id，手机号不进磁盘路径。
+2. **服务端是 Node，不是 Go 网关。** `apps/server` 直接 import `iris-core`，零新依赖（`node:http` + `node:sqlite` + `node:crypto`）。agent 循环、记忆、压缩都在 Node 里，前面再架一层 Go 只是多一个进程转发。
+3. **每个用户一个懒加载的 `IrisSession`**（`hub.ts`）：第一次说话或翻历史时建，闲 30 分钟收尾（`endConversation()` 分档 + 提炼记忆）再关库；停服时全部收尾。同一个人同时只跑一轮，第二句回 409。
+4. **服务端一个工具都不注册。** 文件 / 命令 / 屏幕 / 抖音这些工具动的是跑服务的那台机器，接给外面的用户等于把服务器交出去。测试里断言了发给模型的上下文不含工具名。
+5. **人设卡是用户自己写的**：名字、角色人称、用户人称、是否允许括号动作、正文（≤ 8000 字）。正文走现成的 `personaDoc`。没建卡不能说话（409 `no_card`）。换卡丢弃内存会话，下一句用新卡重建，历史从库里接回。
+6. **prompt 模板里的「他」可换**（`PromptContext.userPronoun` / `IrisSessionOptions.userPronoun` / `CompactionOptions.userPronoun`，默认「他」，桌面壳的 prompt 一个字不变）。`buildSystemPrompt` 在最后统一替换，但别人写的原文——人设卡、记忆、风格档案、边界、自己的账——整行跳过：卡里的「他」多半是角色自己。提炼器的说话人也从写死的「伊里斯」改成可传（`DistillOptions.speaker`）。
+7. **每轮回忆**（`IrisSessionOptions.recallPerTurn`，默认 0 = 关，服务端开 3）：拿对方这句话查库，命中的贴在这句话末尾，只进这一次请求、不进历史。开场注入只有 6 条，库大了以后更早的事只能靠这里浮上来。只留跟这句话有共同二元组的命中——单字命中噪声太大（「今天」的「天」会勾出「冬天」）。
+8. **上游两条路**：用户填了自己的 key（BYOK）就用他的 key 打 `IRIS_BYOK_BASE_URL`（默认 DeepSeek 官方），不占额度；没填走平台上游，每天 `IRIS_DAILY_TURNS` 轮（默认 100），超了回 429 `quota`。两种都记用量（`usage` 表按人按天按是否自带 key），订阅上线时只是改上限。压缩和记忆提炼的那几次模型调用也跟着用户的凭据走。
+9. **上下文窗口压到 64k**（`IRIS_CONTEXT_TOKENS`）：内核默认要涨到约 11 万 token 才压，平台付费压不起。超了照旧把最旧的一段收成记忆（ADR-0023）。
+10. **通道是 SSE，不是 WebSocket**（延续 ADR-0039 的约定）：`POST /say` 的响应本身就是事件流（`delta` … `turn` 或 `error`），15 秒一个心跳。对面断线不打断这一轮——手机网络说断就断，让她说完落库，重连后 `/history` 看得到。
+11. **两个客户端一套接口**：Web 是 `apps/server/public/index.html`（单文件、无依赖、同源，走 HttpOnly cookie）；App 是 `apps/mobile`（Flutter，`dart:io` + `flutter_secure_storage`，走 `Authorization: Bearer`）。登录接口同时下发 cookie 和 token。
+
+### 接口
+
+| 接口 | 作用 |
+|---|---|
+| `POST /auth/code` `{phone}` | 发验证码（6 位、5 分钟、错 5 次作废、同号 60 秒一条、同 IP 每小时 10 条） |
+| `POST /auth/login` `{phone, code}` | 验码，没注册就注册；回 `{token}` 并种 cookie（30 天） |
+| `POST /auth/logout` | 作废当前 token |
+| `GET /me` | 脱敏手机号、人设卡、key 末四位、今日额度 |
+| `PUT /card` | 存人设卡 |
+| `PUT /key` `{key}` / `DELETE /key` | 存 / 删自带 key |
+| `GET /history?before=<id>` | 一页原文（50 条，旧→新） |
+| `POST /say` `{text}` | 说一句，SSE 流式返回 |
+
+### 安全
+
+- 验证码与 token 库里只存 sha256；自带 key 用 AES-256-GCM 封存（主密钥 `IRIS_SECRET`，绑定用户 id），接口只回显末四位。
+- 带 `Origin` 的写请求只认同源（cookie 是 `SameSite=Lax`）；App 不发 `Origin`，走 Bearer。
+- 请求体上限 64 KB，单句 4000 字；人称字段只收 1–4 个文字（它会被拼进模板几十处）。
+- 平台上游的报错不透给用户（只说「她那边出了点问题」），自带 key 的原样透——他需要看到「key 无效 / 欠费」。
+- **开发登录**：设 `IRIS_DEV_PHONE=<手机号>` 时才有 `POST /auth/dev`（免验证码换 token），网页加载会自动调它；没设就是 404。生产不要设。
+
+### 怎么跑
+
+- 服务端：`IRIS_SECRET=<至少 16 个字符> npm run server` → `http://127.0.0.1:5280`。第一次要先 `npm install --ignore-scripts` 和 `npm run build:offline`（pi 的两个包 exports 指向 `dist/`）。若 `build:offline` 报模型数据缺失/过期，先联网跑一次 `npm --prefix packages/ai run hydrate-model-data`（`packages/ai/src/providers/data/` 是生成物，不进 git）。验证码打在服务端日志里。
+- App：`cd apps/mobile && flutter create --project-name iris_mobile --platforms android,ios . && flutter pub get && flutter run --dart-define=IRIS_SERVER=http://<地址>:5280`。Android 正式包要在 `android/app/src/main/AndroidManifest.xml` 加 `INTERNET` 权限（模板只给 debug 加了）。
+
+### 代价与边界
+
+- **没验过的**：Flutter 端没生成平台工程、没 `analyze`（本机没装 Flutter）；Web 端没在浏览器里实际点过；BYOK 直连 DeepSeek 官方时 `reasoning_effort` 这个参数收不收没测过（之前只在本机 Magpie 上跑通）；`flutter_secure_storage` 钉的 9.2.4 没联网核对过是否仍是合适版本。平台默认上游 `deepseek/deepseek-flash` 这次真实对话返回过 `Insufficient Balance`，换 `haocean-opencode-proxy/deepseek-v4.1-flash` 才跑通——是上游账户余额问题，不是服务端逻辑。
+- **验证码只打日志**：能看日志的人就能登任何号。上线前把 `main.ts` 里的 `sendCode` 换成短信商。
+- **单进程单机**：会话在内存里、库是本地文件、发码限流记在内存里。要多实例得先把这三样挪走。
+- **另一台设备看不到正在输出的那一句**，刷新后才有（SSE 是请求级的，不广播）。
+- **关系阶段没落库**：亲密度写死 0.8，「共同经历」拿消息数估。
+- **人称替换是整行级的**：模板行里拼进去的路径、私信名单如果含「他」也会被换。服务端不接那些工具所以碰不到，桌面壳不传 `userPronoun` 也碰不到。
+- **原文永久保存且脱敏有限**（ADR-0014 的规则原样继承）。服务器上现在有真实手机号和全部聊天原文，隐私政策、内容合规、「删除我的数据」入口都还没有。
+- **不做的**：导入 DeepSeek 导出的历史并生成人设卡（下一步；官方「数据管理」页可导出 ZIP/JSON）、重抽、向量检索、Live2D、订阅支付、敏感词过滤。
+

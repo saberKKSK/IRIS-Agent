@@ -53,6 +53,8 @@ export interface CompactionOptions {
 	model?: string;
 	/** 换掉「怎么收成一段话」。 */
 	complete?: CompleteFn;
+	/** 摘要里拿什么指代对面那个人，默认「他」（ADR-0048）。 */
+	userPronoun?: string;
 	/** 收进记忆时的回调（会话层用它写 archive）。 */
 	onConsolidate?: (result: Consolidation) => void | Promise<void>;
 	clock?: () => number;
@@ -105,10 +107,10 @@ function textOf(message: AgentMessage): string {
 }
 
 /** 兜底：模型不可用时，直接把原文按行截断拼一段，不能因此抛错。 */
-export function plainSummary(turns: readonly RawTurn[], limit = 600): string {
+export function plainSummary(turns: readonly RawTurn[], limit = 600, who = "他"): string {
 	const lines: string[] = [];
 	for (const turn of turns) {
-		const speaker = turn.role === "assistant" ? "我" : "他";
+		const speaker = turn.role === "assistant" ? "我" : who;
 		const text = turn.content.replace(/\s+/g, " ").trim();
 		if (text.length === 0) continue;
 		lines.push(speaker + "：" + (text.length > 60 ? text.slice(0, 59) + "…" : text));
@@ -146,9 +148,11 @@ export class ContextCompactor {
 	private readonly summarize: CompleteFn;
 	private readonly onConsolidate: ((result: Consolidation) => void | Promise<void>) | undefined;
 	private readonly clock: () => number;
+	private readonly who: string;
 	private stats: CompactionStats = { count: 0, lastTokensBefore: 0, lastTokensAfter: 0 };
 
 	constructor(options: CompactionOptions = {}) {
+		this.who = options.userPronoun ?? "他";
 		this.contextWindow = options.contextWindow ?? 128_000;
 		this.reserveTokens = options.reserveTokens ?? DEFAULT_RESERVE_TOKENS;
 		this.keepRecentTokens = options.keepRecentTokens ?? DEFAULT_KEEP_RECENT_TOKENS;
@@ -237,19 +241,19 @@ export class ContextCompactor {
 
 	private async summarizeSpan(turns: readonly RawTurn[]): Promise<string> {
 		const prompt =
-			SUMMARY_PROMPT +
+			SUMMARY_PROMPT.replaceAll("他", this.who) +
 			"\n" +
-			turns.map((turn) => (turn.role === "assistant" ? "我：" : "他：") + turn.content).join("\n");
+			turns.map((turn) => (turn.role === "assistant" ? "我：" : this.who + "：") + turn.content).join("\n");
 		let summary = "";
 		try {
 			summary = (await this.summarize(prompt, { system: SUMMARY_SYSTEM })).trim();
 		} catch {
 			summary = "";
 		}
-		if (summary.length === 0) summary = plainSummary(turns);
+		if (summary.length === 0) summary = plainSummary(turns, 600, this.who);
 		// 压出来的东西不能比原文还长
 		const sourceChars = turns.reduce((total, turn) => total + turn.content.length, 0);
-		if (summary.length > Math.max(80, sourceChars)) summary = plainSummary(turns);
+		if (summary.length > Math.max(80, sourceChars)) summary = plainSummary(turns, 600, this.who);
 		return summary;
 	}
 }

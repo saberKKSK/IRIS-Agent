@@ -30,6 +30,8 @@
 			"packages/*/src/**/*.ts",
 			"packages/*/test/**/*.ts",
 			"packages/iris-core/examples/**/*.ts",
+			"apps/server/src/**/*.ts",
+			"apps/server/test/**/*.ts",
 			"packages/ai/catalog/**/*.ts",
 			"packages/coding-agent/examples/**/*.ts",
 			"packages/agent/examples/**/*.ts",
@@ -39,7 +41,7 @@
 			"!**/*.models.ts",
 			"!packages/mom/data/**/*",
 			"!!**/node_modules",
-			"!!apps"
+			"!!apps/desktop"
 		]
 	},
 	"plugins": ["./scripts/biome/model-type-comparison.grit"]

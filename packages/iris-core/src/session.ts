@@ -24,7 +24,7 @@ import type {
 	StyleRecord,
 	TierDecision,
 } from "./archive.ts";
-import { renderMemories } from "./archive.ts";
+import { bigrams, renderMemories } from "./archive.ts";
 import { type CompactionOptions, type Consolidation, type ContextCompactor, createCompactor } from "./context.ts";
 import {
 	chooseEffort,
@@ -191,6 +191,13 @@ export interface IrisSessionOptions {
 	 * 返回 null 表示这一刻没什么好说的（心情平了就闭嘴，别每轮都报「我心情平静」）。
 	 */
 	mood?: () => string | null;
+	/** prompt 模板与压缩摘要里拿什么指代对面那个人，默认「他」（ADR-0048）。 */
+	userPronoun?: string;
+	/**
+	 * 每轮拿对方这句话去库里查几条旧记忆，贴在这句话末尾（ADR-0048）。默认 0 = 不查：
+	 * 开场注入只有 memoryLimit 条，库大了以后更早的事只能靠这里浮上来。
+	 */
+	recallPerTurn?: number;
 	/** 时间源，测试可注入。 */
 	clock?: () => number;
 	/** 会话级事件监听。 */
@@ -445,6 +452,10 @@ export class IrisSession {
 	/** 感知层：每轮现问一次「他现在在干什么」（ADR-0037）。 */
 	private readonly perception: (() => string | null) | undefined;
 	private readonly mood: (() => string | null) | undefined;
+	private readonly userPronoun: string | undefined;
+	private readonly recallPerTurn: number;
+	/** 这一轮对方说的原话，recallNote 拿它去查；她自己开口那轮是空的。 */
+	private turnInput = "";
 	private restoredCount = 0;
 	private styleName: string | null;
 	private readonly episodeTags: readonly string[];
@@ -515,6 +526,8 @@ export class IrisSession {
 		this.dmNames = options.dmNames ?? [];
 		this.perception = options.perception;
 		this.mood = options.mood;
+		this.userPronoun = options.userPronoun;
+		this.recallPerTurn = options.recallPerTurn ?? 0;
 		// 先把会话行定下来，再拿它接历史：重启复用的是同一条会话，不是又一条新的。
 		this.conversationId = this.startConversation();
 		const model = magpieModel(options);
@@ -682,6 +695,7 @@ export class IrisSession {
 		this.expressionStream = new ExpressionStream();
 		this.announcedExpression = null;
 		this.hook = hooks.onEvent ?? null;
+		this.turnInput = internal ? "" : input;
 		// 她要出去查，就把第一条请求的工具强制出来（ADR-0025）。只有一条：查出结果后照常说话。
 		this.toolCallsThisTurn = 0;
 		this.toolErrorsThisTurn = 0;
@@ -1022,6 +1036,7 @@ export class IrisSession {
 			...(this.mood === undefined ? {} : { mood: true }),
 			...(this.toolNames.has("run_command") ? { canShell: true } : {}),
 			...(this.toolNames.has("run_command") && this.shellRoots.length > 0 ? { shellRoots: this.shellRoots } : {}),
+			...(this.userPronoun === undefined ? {} : { userPronoun: this.userPronoun }),
 			now,
 		});
 	}
@@ -1064,6 +1079,7 @@ export class IrisSession {
 		const overrides: CompactionOptions = typeof compact === "object" ? compact : {};
 		return createCompactor({
 			contextWindow,
+			...(this.userPronoun === undefined ? {} : { userPronoun: this.userPronoun }),
 			...overrides,
 			onConsolidate: overrides.onConsolidate ?? ((result) => this.consolidate(result)),
 		});
@@ -1088,7 +1104,23 @@ export class IrisSession {
 			return foldSeenImages(stripNudge(message), turnStart >= 0 && index < turnStart);
 		});
 		const compacted = this.compactor === null ? cleaned : await this.compactor.compact(cleaned);
-		return stampMoment(compacted, momentNote(this.clock()) + this.perceptionNote() + this.moodNote());
+		return stampMoment(
+			compacted,
+			momentNote(this.clock()) + this.perceptionNote() + this.moodNote() + this.recallNote(),
+		);
+	}
+
+	/** 这句话勾起来的旧事（ADR-0048）；没开、没查到就什么都不加。只进这一次请求，不进历史。 */
+	private recallNote(): string {
+		if (this.archive === null || this.recallPerTurn <= 0 || this.turnInput.length === 0) return "";
+		const found = this.archive.recall(this.turnInput, { limit: this.recallPerTurn, budgetTokens: 300 });
+		// 只留跟这句话有共同二元组的：单字命中噪声太大（「今天」的「天」会勾出「冬天」），每轮都贴等于每轮都跑题。
+		const wanted = new Set(bigrams(this.turnInput));
+		const memories = found.hits
+			.map((hit) => hit.memory)
+			.filter((memory) => wanted.size === 0 || bigrams(memory.text).some((gram) => wanted.has(gram)));
+		if (memories.length === 0) return "";
+		return "\n（这句话让你想起的旧事，用得上才提：\n" + renderMemories(memories, this.clock()) + "）";
 	}
 
 	/** 她这一刻的心情（ADR-0044）；平了就什么都不加，免得每轮都在报「我很平静」。 */

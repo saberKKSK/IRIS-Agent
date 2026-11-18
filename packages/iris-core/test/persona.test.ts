@@ -240,3 +240,28 @@ describe("接得下去 + 允许翻车（ADR-0038）", () => {
 		assert.match(text, /别插话给建议/u);
 	});
 });
+
+describe("对面那个人怎么称呼（ADR-0048）", () => {
+	const context = {
+		persona: { ...persona, boundaries: ["他的事不替他做主"] },
+		portrait: "## 你是谁\n你是阿澈，他话不多。",
+		state,
+		relationship: { closeness: 0.8, sharedMoments: 3, lastInteractionAt: 0 },
+		recent: [],
+		memories: ["· [昨天 · 重要] 他哥哥叫阿远"],
+		now: 0,
+	};
+
+	it("不传就还是「他」", () => {
+		assert.match(buildSystemPrompt(context), /他不同意就顶一句/u);
+	});
+
+	it("传了就换掉模板里的「他」，卡、记忆、边界里的原文不动", () => {
+		const text = buildSystemPrompt({ ...context, userPronoun: "她" });
+		assert.match(text, /她不同意就顶一句/u);
+		assert.doesNotMatch(text, /他不同意/u);
+		assert.match(text, /你是阿澈，他话不多/u, "卡里的「他」是角色自己");
+		assert.match(text, /他哥哥叫阿远/u, "记忆是原话");
+		assert.match(text, /他的事不替他做主/u, "边界是卡的一部分");
+	});
+});

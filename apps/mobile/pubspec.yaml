@@ -1,0 +1,16 @@
+name: iris_mobile
+description: IRIS companion app, talks to apps/server (ADR-0048).
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # 登录 token 放系统钥匙串 / Keystore，不放明文偏好文件。
+  flutter_secure_storage: 9.2.4
+
+flutter:
+  uses-material-design: true

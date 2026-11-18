@@ -8,8 +8,9 @@
 	"scripts": {
 		"build": "npm --prefix packages/telemetry run build && npm --prefix packages/schema run build && npm --prefix packages/ai run build && npm --prefix packages/agent run build",
 		"build:offline": "npm --prefix packages/telemetry run build && npm --prefix packages/schema run build && npm --prefix packages/ai run build:offline && npm --prefix packages/agent run build",
-		"check": "npx biome check packages/iris-core && npx tsc -p packages/iris-core/tsconfig.check.json",
-		"test": "npm --prefix packages/iris-core run test",
+		"check": "npx biome check packages/iris-core apps/server && npx tsc -p packages/iris-core/tsconfig.check.json && npx tsc -p apps/server/tsconfig.check.json",
+		"test": "npm --prefix packages/iris-core run test && npm --prefix apps/server run test",
+		"server": "npm --prefix apps/server run start",
 		"live": "npm --prefix packages/iris-core run live",
 		"talk": "npm --prefix packages/iris-core run talk",
 		"bench": "npm --prefix packages/iris-core run bench",

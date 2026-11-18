@@ -529,6 +529,16 @@ export class SqliteArchive {
 		return rows.map((row) => ({ role: row.role as RawTurn["role"], content: row.content, at: row.at })).reverse();
 	}
 
+	/** 翻历史（ADR-0048）：行 id 比 before 小的 limit 条，旧→新；id 给客户端当下一页的游标。 */
+	history(limit = 50, before = Number.MAX_SAFE_INTEGER): readonly (RawTurn & { id: number })[] {
+		const rows = this.db
+			.prepare("SELECT id, role, content, at FROM messages WHERE id < ? ORDER BY id DESC LIMIT ?")
+			.all(before, limit) as unknown as readonly { id: number; role: string; content: string; at: number }[];
+		return rows
+			.map((row) => ({ id: row.id, role: row.role as RawTurn["role"], content: row.content, at: row.at }))
+			.reverse();
+	}
+
 	messagesOf(conversationId: string): readonly RawTurn[] {
 		const rows = this.db
 			.prepare("SELECT role, content, at FROM messages WHERE conversation_id = ? ORDER BY seq")
